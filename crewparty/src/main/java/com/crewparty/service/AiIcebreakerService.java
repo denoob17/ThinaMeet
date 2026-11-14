@@ -31,6 +31,10 @@ public class AiIcebreakerService {
     private static final String ENDPOINT = "https://api.openai.com/v1/chat/completions";
     private static final String MODEL = "gpt-4o-mini";
 
+    /** Kept short on purpose: creating a party must never make the UI hang on a slow upstream. */
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(6);
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(3);
+
     private static final Map<String, List<String>> FALLBACKS = Map.of(
             "Board Games", List.of(
                     "What is the most chaotic house rule your group ever invented?",
@@ -60,7 +64,7 @@ public class AiIcebreakerService {
     private final String apiKey;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(5))
+            .connectTimeout(CONNECT_TIMEOUT)
             .build();
 
     public AiIcebreakerService(@Value("${openai.api.key:}") String apiKey) {
@@ -103,7 +107,7 @@ public class AiIcebreakerService {
         body.set("messages", messages);
 
         HttpRequest request = HttpRequest.newBuilder(URI.create(ENDPOINT))
-                .timeout(Duration.ofSeconds(12))
+                .timeout(REQUEST_TIMEOUT)
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer " + apiKey)
                 .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))

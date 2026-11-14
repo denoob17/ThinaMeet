@@ -12,6 +12,7 @@ import com.crewparty.service.AiIcebreakerService;
 import com.crewparty.service.PartyMatchService;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -52,7 +53,7 @@ public class ApiController {
     public BootstrapResponse bootstrap() {
         List<Party> openParties = repository.getOpenParties();
         // No filters are applied yet, so every open party scores a full match here.
-        openParties.forEach(party -> party.setFitScore(matchService.calculateFitScore(party, null, null, 0)));
+        openParties.forEach(party -> matchService.scoreParty(party, null, null, 0));
 
         return new BootstrapResponse(
                 repository.getFriends(),
@@ -77,6 +78,7 @@ public class ApiController {
     }
 
     @PostMapping("/parties")
+    @ResponseStatus(HttpStatus.CREATED)
     public Party createParty(@RequestBody CreatePartyRequest request) {
         if (request.title() == null || request.title().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Give your party a title.");
@@ -116,7 +118,7 @@ public class ApiController {
                 icebreakerService.generateIcebreakers(request.theme(), request.title(), venue.getCity()),
                 Party.OPEN);
 
-        party.setFitScore(matchService.calculateFitScore(party, party.getTheme(), party.getCity(), 0));
+        matchService.scoreParty(party, party.getTheme(), party.getCity(), 0);
         return repository.saveParty(party);
     }
 
