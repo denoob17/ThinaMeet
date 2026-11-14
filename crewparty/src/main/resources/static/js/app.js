@@ -447,7 +447,8 @@
     var host = el('history-list');
     var visits = sortedHistory();
     if (!visits.length) {
-      host.innerHTML = emptyState('No visits logged yet', 'Finish a party with "Complete & Rate Visit" and it will land here for a rating.');
+
+      host.innerHTML = nextUpHtml() + emptyState('No visits logged yet', 'Finish a party with "Complete & Rate Visit" and it will land here for a rating.');
       return;
     }
     host.innerHTML = visits.map(historyCard).join('');
