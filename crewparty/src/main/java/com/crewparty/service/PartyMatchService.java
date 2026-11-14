@@ -49,33 +49,74 @@ public class PartyMatchService {
 
     // ---------------------------------------------------------------- matching
 
-    /** Fit score (0-100) of an open party against the current search filters. */
-    public int calculateFitScore(Party party, String theme, String city, int maxBudget) {
+    /**
+     * Transparent fit score (0-100) of an open party against the current search filters.
+     * Every contribution is deterministic and is explained in {@link FitResult#reasons()},
+     * so the UI can always justify why a party surfaced.
+     */
+    public FitResult calculateFitScore(Party party, String theme, String city, int maxBudget) {
         int score = 0;
+        List<String> reasons = new ArrayList<>();
 
         if (isAny(theme, ANY_THEME)) {
             score += THEME_WEIGHT;
+            reasons.add("No theme filter — every theme counts (+" + THEME_WEIGHT + ")");
         } else if (equalsIgnoreCase(party.getTheme(), theme)) {
             score += THEME_WEIGHT;
+            reasons.add("Theme matches \"" + theme + "\" (+" + THEME_WEIGHT + ")");
+        } else {
+            reasons.add("Theme is \"" + party.getTheme() + "\", not your \"" + theme + "\" filter (+0)");
         }
 
         if (isAny(city, ANY_CITY)) {
             score += CITY_WEIGHT;
+            reasons.add("No city filter — every city counts (+" + CITY_WEIGHT + ")");
         } else if (equalsIgnoreCase(party.getCity(), city)) {
             score += CITY_WEIGHT;
+            reasons.add("Happening in " + party.getCity() + " (+" + CITY_WEIGHT + ")");
+        } else {
+            reasons.add("Happening in " + party.getCity() + ", not " + city + " (+0)");
         }
 
-        if (maxBudget <= 0 || party.getBudgetMin() <= maxBudget) {
+        if (maxBudget <= 0) {
             score += BUDGET_WEIGHT;
+            reasons.add("No budget limit set (+" + BUDGET_WEIGHT + ")");
+        } else if (party.getBudgetMin() <= maxBudget) {
+            score += BUDGET_WEIGHT;
+            reasons.add("$" + party.getBudgetMin() + "-$" + party.getBudgetMax()
+                    + " fits your $" + maxBudget + " limit (+" + BUDGET_WEIGHT + ")");
         } else if (party.getBudgetMin() <= maxBudget + 10) {
             score += BUDGET_WEIGHT / 2;
+            reasons.add("Slightly over budget ($" + party.getBudgetMin() + " vs $" + maxBudget
+                    + ") (+" + (BUDGET_WEIGHT / 2) + ")");
+        } else {
+            reasons.add("Starts at $" + party.getBudgetMin() + ", above your $" + maxBudget
+                    + " limit (+0)");
         }
 
         if (party.getOpenSlots() > 0) {
             score += SLOTS_WEIGHT;
+            reasons.add(party.getOpenSlots() + " slot(s) still open (+" + SLOTS_WEIGHT + ")");
+        } else {
+            reasons.add("Party is already full (+0)");
         }
 
-        return score;
+        return new FitResult(score, List.copyOf(reasons));
+    }
+
+    /**
+     * Recomputes the party's fit score for the given filters and stores both the number and its
+     * human-readable breakdown on the party itself, so they travel to the frontend in every payload.
+     */
+    public Party scoreParty(Party party, String theme, String city, int maxBudget) {
+        FitResult fit = calculateFitScore(party, theme, city, maxBudget);
+        party.setFitScore(fit.score());
+        party.setMatchReasons(fit.reasons());
+        return party;
+    }
+
+    /** The integer fit score plus the reasons behind it. */
+    public record FitResult(int score, List<String> reasons) {
     }
 
     /** Fit score (0-100) of a discoverable player against the current search filters. */
@@ -109,10 +150,7 @@ public class PartyMatchService {
 
     public List<Party> openPartiesMatching(String theme, String city, int maxBudget) {
         return repository.getOpenParties().stream()
-                .map(party -> {
-                    party.setFitScore(calculateFitScore(party, theme, city, maxBudget));
-                    return party;
-                })
+                .map(party -> scoreParty(party, theme, city, maxBudget))
                 .filter(party -> party.getFitScore() >= MIN_MATCH_SCORE)
                 .sorted(Comparator.comparingInt(Party::getFitScore).reversed())
                 .toList();

@@ -32,6 +32,9 @@ public class Party {
     /** Recomputed by the match service for the current search filters (0-100). */
     private int fitScore;
 
+    /** Human-readable breakdown of {@link #fitScore}, recomputed with every search. */
+    private List<String> matchReasons = new ArrayList<>();
+
     public Party() {
     }
 
@@ -186,5 +189,13 @@ public class Party {
 
     public void setFitScore(int fitScore) {
         this.fitScore = fitScore;
+    }
+
+    public List<String> getMatchReasons() {
+        return matchReasons;
+    }
+
+    public void setMatchReasons(List<String> matchReasons) {
+        this.matchReasons = new ArrayList<>(matchReasons);
     }
 }
