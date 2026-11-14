@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CrewParty — Find your crew. Pick the spot. Rate the hangout.</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <div class="brand">
+      <span class="brand-mark">CrewParty</span>
+      <span class="brand-tagline">Find your crew. Pick the spot. Rate the hangout.</span>
+    </div>
+    <div class="header-actions">
+      <label class="field-inline">
+        <span class="field-label">City</span>
+        <select id="global-city" class="select" data-action="global-city">
+          <option value="All Cities">All Cities</option>
+          <option value="Chicago">Chicago</option>
+          <option value="Austin">Austin</option>
+          <option value="Seattle">Seattle</option>
+          <option value="Washington, D.C.">Washington, D.C.</option>
+        </select>
+      </label>
+      <button class="btn btn-ghost" data-action="demo">1-Click Demo: 2 Buddies Seeking 2 Players</button>
+      <button class="btn btn-primary" id="upgrade-btn" data-action="open-paywall">Upgrade ($9.99/mo)</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs" aria-label="Main sections">
+    <button class="tab active" data-action="switch-tab" data-tab="explore">Explore &amp; Search</button>
+    <button class="tab" data-action="switch-tab" data-tab="friends">Friends (Crew)</button>
+    <button class="tab" data-action="switch-tab" data-tab="history">Visit History &amp; Ratings</button>
+    <button class="tab" data-action="switch-tab" data-tab="venues">Rated Venues</button>
+  </nav>
+</header>
+
+<main class="page">
+
+  <!-- ============ TAB 1: EXPLORE & SEARCH ============ -->
+  <section class="view active" id="view-explore">
+    <div class="filter-bar card">
+      <div class="field">
+        <label class="field-label" for="filter-theme">Theme</label>
+        <select id="filter-theme" class="select">
+          <option value="">All Themes</option>
+          <option value="Board Games">Board Games</option>
+          <option value="Co-op Video Games">Co-op Video Games</option>
+          <option value="Coworking &amp; Chill">Coworking &amp; Chill</option>
+          <option value="Trivia &amp; Social">Trivia &amp; Social</option>
+          <option value="Outdoor Casual">Outdoor Casual</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label" for="filter-budget">Max Budget ($)</label>
+        <input id="filter-budget" class="input" type="number" min="0" step="1" value="0" placeholder="0 = no limit" />
+      </div>
+      <div class="filter-actions">
+        <button class="btn btn-primary" data-action="search">Search</button>
+        <button class="btn btn-ghost" data-action="reset-filters">Reset</button>
+        <button class="btn btn-accent" data-action="open-create">+ Create Party</button>
+      </div>
+    </div>
+
+    <div class="explore-grid">
+      <div class="explore-main">
+        <h2 class="section-title">Open Parties</h2>
+        <div id="party-list" class="card-list">
+          <div class="loading">Loading open parties…</div>
+        </div>
+
+        <h2 class="section-title">Players you could meet</h2>
+        <div id="player-list" class="card-list grid-2">
+          <div class="loading">Loading players…</div>
+        </div>
+      </div>
+
+      <aside class="explore-side">
+        <h2 class="section-title">Venues on the map</h2>
+        <div id="venue-map" class="venue-map" aria-label="Map of venues"></div>
+        <div id="venue-mini-list" class="mini-venue-list">
+          <div class="loading">Loading venues…</div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ============ TAB 2: FRIENDS (CREW) ============ -->
+  <section class="view" id="view-friends">
+    <div class="view-head">
+      <div>
+        <h2 class="section-title">Friends (Crew)</h2>
+        <p class="section-sub">Your core buddy, saved friends, and people you could still add.</p>
+      </div>
+      <button class="btn btn-accent" data-action="start-party-with-friends">Start Party with Friends</button>
+    </div>
+    <div id="core-buddy-card" class="core-buddy-wrap"></div>
+    <div id="friends-list" class="card-list grid-2">
+      <div class="loading">Loading your crew…</div>
+    </div>
+  </section>
+
+  <!-- ============ TAB 3: VISIT HISTORY & RATINGS ============ -->
+  <section class="view" id="view-history">
+    <div class="view-head">
+      <div>
+        <h2 class="section-title">Visit History &amp; Ratings</h2>
+        <p class="section-sub">Rate the venue, tag the vibe, and add the people you just met.</p>
+      </div>
+    </div>
+    <div id="history-list" class="card-list">
+      <div class="loading">Loading visit history…</div>
+    </div>
+  </section>
+
+  <!-- ============ TAB 4: RATED VENUES ============ -->
+  <section class="view" id="view-venues">
+    <div class="view-head">
+      <div>
+        <h2 class="section-title">Rated Venues</h2>
+        <p class="section-sub">Live ratings straight from the crew, sorted the way you like.</p>
+      </div>
+      <div class="view-head-controls">
+        <label class="field-inline">
+          <span class="field-label">Sort</span>
+          <select id="venue-sort" class="select" data-action="venue-sort">
+            <option value="rating">Rating</option>
+            <option value="price">Price</option>
+          </select>
+        </label>
+        <label class="field-inline">
+          <span class="field-label">City</span>
+          <select id="venue-city-filter" class="select" data-action="venue-city-filter">
+            <option value="All Cities">All Cities</option>
+            <option value="Chicago">Chicago</option>
+            <option value="Austin">Austin</option>
+            <option value="Seattle">Seattle</option>
+            <option value="Washington, D.C.">Washington, D.C.</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div id="venue-list" class="card-list grid-2">
+      <div class="loading">Loading venues…</div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============ MODAL: PAYWALL ============ -->
+<div class="modal" id="paywall-modal">
+  <div class="modal-backdrop" data-action="close-modal"></div>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="paywall-title">
+    <header class="modal-header">
+      <h3 id="paywall-title">CrewParty Pro</h3>
+      <button class="icon-btn" data-action="close-modal" aria-label="Close">&times;</button>
+    </header>
+    <div class="modal-body">
+      <div id="paywall-form">
+        <ul class="benefit-list">
+          <li>Unlimited party creation and 1-click crew matching</li>
+          <li>Fit Score tuning with budget and vibe filters</li>
+          <li>Venue insights: live ratings, cost, and best-theme hints</li>
+          <li>Priority invites to open parties in your city</li>
+        </ul>
+        <div class="price-line"><span class="price-lg">$9.99</span> <span class="price-sub">per month &middot; cancel anytime</span></div>
+        <div class="field">
+          <label class="field-label" for="card-number">Card number</label>
+          <input id="card-number" class="input" value="4242 4242 4242 4242" placeholder="4242 4242 4242 4242" autocomplete="off" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label class="field-label" for="card-exp">Expiry</label>
+            <input id="card-exp" class="input" value="12/34" placeholder="MM/YY" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="card-cvc">CVC</label>
+            <input id="card-cvc" class="input" value="123" placeholder="123" autocomplete="off" />
+          </div>
+        </div>
+        <p class="hint">Test mode only — no real payment is processed.</p>
+        <button class="btn btn-primary btn-block" data-action="start-pro">Start Pro — Test Mode</button>
+      </div>
+      <div id="paywall-success" class="paywall-success" hidden>
+        <div class="success-glyph">★</div>
+        <h4>Pro unlocked</h4>
+        <p>Your crew just got an upgrade. Enjoy unlimited parties, smarter matching, and priority invites.</p>
+        <button class="btn btn-ghost btn-block" data-action="close-modal">Back to CrewParty</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: CREATE PARTY ============ -->
+<div class="modal" id="create-modal">
+  <div class="modal-backdrop" data-action="close-modal"></div>
+  <div class="modal-panel modal-panel-wide" role="dialog" aria-modal="true" aria-labelledby="create-modal-title">
+    <header class="modal-header">
+      <h3 id="create-modal-title">Create a Party</h3>
+      <button class="icon-btn" data-action="close-modal" aria-label="Close">&times;</button>
+    </header>
+    <div class="modal-body">
+      <form id="create-form" novalidate>
+        <div class="field">
+          <label class="field-label" for="create-title">Title</label>
+          <input id="create-title" class="input" type="text" placeholder="e.g. Friday Night Board Games" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label class="field-label" for="create-theme">Theme</label>
+            <select id="create-theme" class="select"></select>
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-city">City</label>
+            <select id="create-city" class="select" data-action="create-city"></select>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label class="field-label" for="create-neighborhood">Neighborhood</label>
+            <input id="create-neighborhood" class="input" type="text" placeholder="e.g. Logan Square" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-venue">Venue</label>
+            <select id="create-venue" class="select" data-action="create-venue"></select>
+          </div>
+        </div>
+        <div class="field-row field-row-3">
+          <div class="field">
+            <label class="field-label" for="create-slots">Total slots</label>
+            <input id="create-slots" class="input" type="number" min="2" max="8" step="1" value="4" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-budget-min">Budget min $</label>
+            <input id="create-budget-min" class="input" type="number" min="0" step="1" value="10" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-budget-max">Budget max $</label>
+            <input id="create-budget-max" class="input" type="number" min="0" step="1" value="30" />
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label" for="create-time">Time label</label>
+          <input id="create-time" class="input" type="text" placeholder="e.g. Sat 3:00 PM" />
+        </div>
+        <div class="field">
+          <span class="field-label">Invite your buddies</span>
+          <div id="create-buddies" class="check-list"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create Party</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: PARTY / FRIEND CHOOSER ============ -->
+<div class="modal" id="chooser-modal">
+  <div class="modal-backdrop" data-action="close-modal"></div>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="chooser-title">
+    <header class="modal-header">
+      <h3 id="chooser-title">Choose</h3>
+      <button class="icon-btn" data-action="close-modal" aria-label="Close">&times;</button>
+    </header>
+    <div class="modal-body">
+      <div id="chooser-list" class="chooser-list"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast-area" class="toast-area" aria-live="polite" aria-atomic="false"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+<script src="js/api.js" defer></script>
+<script src="js/map.js" defer></script>
+<script src="js/app.js" defer></script>
+</body>
+</html>
