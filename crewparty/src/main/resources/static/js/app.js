@@ -451,7 +451,7 @@
       host.innerHTML = nextUpHtml() + emptyState('No visits logged yet', 'Finish a party with "Complete & Rate Visit" and it will land here for a rating.');
       return;
     }
-    host.innerHTML = visits.map(historyCard).join('');
+    host.innerHTML = nextUpHtml() + visits.map(historyCard).join('');
   }
 
   /* ---------------- rendering: venues ---------------- */
