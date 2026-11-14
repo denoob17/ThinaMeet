@@ -419,6 +419,30 @@
       '</article>';
   }
 
+  function nextUpHtml() {
+    var visits = sortedHistory();
+    var seen = {};
+    var liked = {};
+    visits.forEach(function (v) {
+      seen[v.venueId] = true;
+      if (v.rating >= 4) liked[v.theme] = (liked[v.theme] || 0) + 1;
+    });
+    var fav = Object.keys(liked).sort(function (x, y) { return liked[y] - liked[x]; })[0];
+    var pool = state.venues.filter(function (v) { return !seen[v.id]; });
+    if (!pool.length) pool = state.venues.slice();
+    pool.sort(function (x, y) { return num(y.avgRating, 0) - num(x.avgRating, 0); });
+    var pick = pool[0];
+    if (!pick) return '';
+    var mate = state.friends.filter(function (f) {
+      return f.status === 'FRIEND' && (!fav || (f.themes || []).indexOf(fav) !== -1);
+    })[0];
+    var why = fav ? 'You rated ' + fav + ' nights 4+ stars.' : 'Top-rated spot you have not visited yet.';
+    return '<article class="card next-up"><h3>Next up: ' + escapeHtml(pick.name) + '</h3>' +
+      '<p>' + escapeHtml(pick.city) + ' &middot; &#9733; ' + num(pick.avgRating, 0).toFixed(1) + '. ' + escapeHtml(why) +
+      (mate ? ' Invite ' + escapeHtml(mate.name) + ' from your crew.' : '') + '</p>' +
+      '<button class="btn btn-primary" data-action="switch-tab" data-tab="explore">Plan this hangout</button></article>';
+  }
+
   function renderHistory() {
     var host = el('history-list');
     var visits = sortedHistory();
