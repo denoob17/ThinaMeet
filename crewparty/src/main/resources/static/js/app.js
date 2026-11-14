@@ -709,6 +709,12 @@
 
     if (!payload.title) { showToast('Please give your party a title.', 'error'); return; }
     if (!payload.venueId) { showToast('Please pick a venue for the party.', 'error'); return; }
+    if (!state.pro && createdCount() >= FREE_PARTIES) {
+      closeAllModals();
+      showToast('Free plan includes ' + FREE_PARTIES + ' parties. Go Pro for unlimited.', 'error');
+      openPaywall();
+      return;
+    }
     if (!payload.neighborhood) payload.neighborhood = payload.city;
     if (!payload.timeLabel) payload.timeLabel = 'This weekend';
 
