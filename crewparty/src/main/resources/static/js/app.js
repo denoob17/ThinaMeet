@@ -691,6 +691,7 @@
     if (submitBtn) submitBtn.disabled = true;
 
     window.CrewApi.createParty(payload).then(function (party) {
+      bumpCreated();
       closeAllModals();
       return reloadData().then(function () {
         renderAll();
