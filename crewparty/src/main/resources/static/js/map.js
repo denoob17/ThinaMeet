@@ -55,7 +55,7 @@
   let resizeBound = false;
   let lastGeocodeAt = 0;
 
-  const handlers = { onVenueSelect: null, onSpotPick: null, onSpotResolved: null, onPartySelect: null };
+  const handlers = { onVenueSelect: null, onSpotPick: null, onSpotResolved: null, onPartySelect: null, onLocateMe: null };
 
   const escapeHtml = (value) => {
     if (value === null || value === undefined) return '';
@@ -422,6 +422,37 @@
     }, { passive: false });
   };
 
+  /**
+   * Bottom-right in-map control that re-runs the GPS fix. Living inside the map container it floats
+   * over the tiles like the zoom buttons instead of sitting in the page flow; the click is forwarded
+   * to app.js so "locate me" stays a single implementation (detectCity -> marker + city sync).
+   */
+  const addLocateControl = () => {
+    const LocateControl = L.Control.extend({
+      options: { position: 'bottomright' },
+      onAdd() {
+        const container = L.DomUtil.create('div', 'leaflet-control map-locate-control');
+        const button = L.DomUtil.create('button', 'map-locate-btn', container);
+        button.type = 'button';
+        button.title = 'Detect my location';
+        button.setAttribute('aria-label', 'Detect my location');
+        button.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">'
+          + '<circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/>'
+          + '<circle cx="12" cy="12" r="2.4" fill="currentColor"/>'
+          + '<path d="M12 1.6v3.4M12 19v3.4M1.6 12H5M19 12h3.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'
+          + '</svg>';
+        // Without this a click would also reach the map and drop a custom spot underneath the button.
+        L.DomEvent.disableClickPropagation(container);
+        L.DomEvent.on(button, 'click', (event) => {
+          L.DomEvent.stop(event);
+          if (handlers.onLocateMe) handlers.onLocateMe();
+        });
+        return container;
+      }
+    });
+    map.addControl(new LocateControl());
+  };
+
   const init = (containerId) => {
     const container = document.getElementById(containerId);
     if (!container || typeof L === 'undefined') return null;
@@ -449,6 +480,7 @@
     map.on('zoomend', onViewChanged);
     map.on('moveend', onViewChanged);
     bindTrackpadPinchZoom(container);
+    addLocateControl();
 
     if (!resizeBound) {
       resizeBound = true;

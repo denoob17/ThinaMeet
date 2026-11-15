@@ -2255,7 +2255,8 @@
         onVenueSelect: (venueId) => openVenueDrawer(venueId),
         onSpotPick: (spot) => handleSpotPick(spot),
         onSpotResolved: (spot) => handleSpotResolved(spot),
-        onPartySelect: (partyId) => focusParty(partyId)
+        onPartySelect: (partyId) => focusParty(partyId),
+        onLocateMe: () => detectCity()
       });
     }
 
