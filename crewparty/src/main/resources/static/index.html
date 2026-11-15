@@ -16,6 +16,29 @@
       <span class="brand-mark">CrewParty</span>
       <span class="brand-tagline">Find your crew. Pick the spot. Rate the hangout.</span>
     </div>
+
+    <div class="identity-strip">
+      <div class="identity-badge" id="identity-badge" title="This browser tab's live identity">
+        <span class="identity-avatar" id="identity-avatar">?</span>
+        <span class="identity-text">
+          <span class="identity-label">You</span>
+          <span class="identity-name" id="identity-name">Connecting…</span>
+          <span class="identity-sub" id="identity-sub"></span>
+        </span>
+      </div>
+      <button class="btn btn-ghost btn-sm" data-action="open-second-tab" title="Open a second live user in a new tab">Open 2nd User Tab</button>
+      <div class="notif-wrap">
+        <button class="notif-bell" id="notif-bell" data-action="toggle-notif" aria-haspopup="true" aria-expanded="false" aria-label="Notifications">
+          <span class="notif-glyph" aria-hidden="true">&#128276;</span>
+          <span class="notif-count" id="notif-count" hidden>0</span>
+        </button>
+        <div class="notif-panel" id="notif-panel" hidden>
+          <div class="notif-panel-head">Live notifications</div>
+          <div id="notif-list" class="notif-list"></div>
+        </div>
+      </div>
+    </div>
+
     <div class="header-actions">
       <label class="field-inline">
         <span class="field-label">City</span>
@@ -42,47 +65,32 @@
 
   <!-- ============ TAB 1: EXPLORE & SEARCH ============ -->
   <section class="view active" id="view-explore">
+    <div class="filter-bar card">
+      <div class="field">
+        <label class="field-label" for="filter-theme">Theme</label>
+        <select id="filter-theme" class="select">
+          <option value="">All Themes</option>
+          <option value="Board Games">Board Games</option>
+          <option value="Co-op Video Games">Co-op Video Games</option>
+          <option value="Coworking &amp; Chill">Coworking &amp; Chill</option>
+          <option value="Trivia &amp; Social">Trivia &amp; Social</option>
+          <option value="Outdoor Casual">Outdoor Casual</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label" for="filter-budget">Max Budget ($)</label>
+        <input id="filter-budget" class="input" type="number" min="0" step="1" value="0" placeholder="0 = no limit" />
+      </div>
+      <div class="filter-actions">
+        <button class="btn btn-primary" data-action="search">Search</button>
+        <button class="btn btn-ghost" data-action="reset-filters">Reset</button>
+        <button class="btn btn-accent" data-action="open-create">+ Create Party</button>
+      </div>
+    </div>
+
     <div class="explore-grid">
       <div class="explore-main">
-        <div class="explore-toolbar">
-          <button class="btn btn-ghost filters-btn" id="filters-toggle" data-action="toggle-filters" aria-expanded="false" aria-controls="filter-bar">
-            <span aria-hidden="true">&#9776;</span> Filters <span class="filters-count" id="filters-count" hidden>0</span>
-          </button>
-          <div class="quick-chips" id="quick-themes" role="group" aria-label="Quick theme filter">
-            <button class="qchip active" data-action="quick-theme" data-theme="">All</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Board Games">&#127922; Board Games</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Co-op Video Games">&#127918; Co-op Games</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Coworking &amp; Chill">&#9749; Coworking</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Trivia &amp; Social">&#127881; Trivia</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Outdoor Casual">&#127795; Outdoor</button>
-          </div>
-          <button class="link-btn" id="filters-clear" data-action="reset-filters" hidden>Clear all</button>
-        </div>
-        <div class="filter-bar card" id="filter-bar" hidden>
-          <div class="field">
-            <label class="field-label" for="filter-theme">Theme</label>
-            <select id="filter-theme" class="select" data-action="filter-change">
-              <option value="">All Themes</option>
-              <option value="Board Games">Board Games</option>
-              <option value="Co-op Video Games">Co-op Video Games</option>
-              <option value="Coworking &amp; Chill">Coworking &amp; Chill</option>
-              <option value="Trivia &amp; Social">Trivia &amp; Social</option>
-              <option value="Outdoor Casual">Outdoor Casual</option>
-            </select>
-          </div>
-          <div class="field">
-            <label class="field-label" for="filter-budget">Max Budget ($)</label>
-            <input id="filter-budget" class="input" data-action="filter-change" type="number" min="0" step="1" value="0" placeholder="0 = no limit" />
-          </div>
-          <div class="filter-actions">
-            <button class="btn btn-primary" data-action="search">Apply</button>
-            <button class="btn btn-ghost" data-action="reset-filters">Reset</button>
-            <button class="btn btn-accent" data-action="open-create">+ Create Party</button>
-          </div>
-        </div>
-
         <h2 class="section-title">Open Parties</h2>
-        <p class="results-summary" id="results-summary" aria-live="polite"></p>
         <div id="party-list" class="card-list">
           <div class="loading">Loading open parties…</div>
         </div>

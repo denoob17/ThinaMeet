@@ -23,6 +23,21 @@ public class Venue {
     private double lat;
     private double lng;
 
+    /** True for a verified public place the safety filter can surface (never a private address). */
+    private boolean publicSafeSpot = true;
+
+    /** Highlighted partner venue - gets a small badge in the UI. */
+    private boolean featuredPartner;
+
+    /** Number of OPEN slots currently hosted here, refreshed by the repository after every change. */
+    private int activeSlotCount;
+
+    /** How many guests are waiting in line for a slot at this venue. */
+    private int queueCount;
+
+    /** True for a venue generated on the fly around the caller's GPS position (demo pool). */
+    private boolean demoPool;
+
     /** Sum of every star given to this venue - kept so a re-rating does not double count. */
     private double ratingSum;
 
@@ -132,6 +147,46 @@ public class Venue {
 
     public void setLng(double lng) {
         this.lng = lng;
+    }
+
+    public boolean isPublicSafeSpot() {
+        return publicSafeSpot;
+    }
+
+    public void setPublicSafeSpot(boolean publicSafeSpot) {
+        this.publicSafeSpot = publicSafeSpot;
+    }
+
+    public boolean isFeaturedPartner() {
+        return featuredPartner;
+    }
+
+    public void setFeaturedPartner(boolean featuredPartner) {
+        this.featuredPartner = featuredPartner;
+    }
+
+    public int getActiveSlotCount() {
+        return activeSlotCount;
+    }
+
+    public void setActiveSlotCount(int activeSlotCount) {
+        this.activeSlotCount = activeSlotCount;
+    }
+
+    public int getQueueCount() {
+        return queueCount;
+    }
+
+    public void setQueueCount(int queueCount) {
+        this.queueCount = queueCount;
+    }
+
+    public boolean isDemoPool() {
+        return demoPool;
+    }
+
+    public void setDemoPool(boolean demoPool) {
+        this.demoPool = demoPool;
     }
 
     @JsonIgnore
