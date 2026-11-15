@@ -701,6 +701,68 @@
     el('notif-bell').setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
+  /* ---------------- Detect My City (browser GPS -> /api/gps/seed) ---------------- */
+
+  function ensureCityOption(selectId, city) {
+    var sel = el(selectId);
+    if (!sel) return;
+    for (var i = 0; i < sel.options.length; i++) if (sel.options[i].value === city) return;
+    var opt = document.createElement('option');
+    opt.value = city;
+    opt.textContent = city;
+    sel.appendChild(opt);
+  }
+
+  function reverseCityName(lat, lng) {
+    var url = 'https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=10&addressdetails=1&accept-language=en&lat=' + lat + '&lon=' + lng;
+    return fetch(url).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+      var a = d && d.address;
+      if (!a) return '';
+      return a.city || a.town || a.village || a.municipality || a.county || a.state || '';
+    }).catch(function () { return ''; });
+  }
+
+  function detectCity() {
+    var btn = el('detect-city-btn');
+    if (!navigator.geolocation) {
+      showToast('Your browser does not support location detection. Pick a city manually.', 'error');
+      return;
+    }
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = 'Detecting\u2026';
+    var done = function () { btn.disabled = false; btn.innerHTML = '&#128205; Detect My City'; };
+
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      var lat = pos.coords.latitude, lng = pos.coords.longitude;
+      reverseCityName(lat, lng).then(function (name) {
+        return window.CrewApi.gpsSeed(lat, lng, name);
+      }).then(function (res) {
+        var city = res.city || 'Your Area';
+        if (CITIES.indexOf(city) === -1) CITIES.push(city);
+        ensureCityOption('global-city', city);
+        ensureCityOption('venue-city-filter', city);
+        el('global-city').value = city;
+        return reloadData().then(function () {
+          return doSearch(true);
+        }).then(function () {
+          if (window.CrewMap) window.CrewMap.centerOn(res.centerLat, res.centerLng, 13);
+          showToast(res.venuesCreated
+            ? 'Found you in ' + city + ' \u2014 added ' + res.venuesCreated + ' demo spots nearby.'
+            : 'Welcome back to ' + city + '.', 'success');
+        });
+      }).catch(function (err) {
+        showToast('Could not set up your city: ' + err.message, 'error');
+      }).then(done);
+    }, function (err) {
+      var msg = err && err.code === 1
+        ? 'Location access was blocked. Allow it in your browser settings or pick a city manually.'
+        : 'Could not get your location. Pick a city manually.';
+      showToast(msg, 'error');
+      done();
+    }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
+  }
+
   function resetFilters() {
     el('global-city').value = 'All Cities';
     el('filter-theme').value = '';
@@ -1096,6 +1158,7 @@
     'switch-tab': function (node) { switchTab(node.dataset.tab); },
     'toggle-filters': function () { toggleFilters(); },
     'toggle-notif': function () { toggleNotif(); },
+    'detect-city': function () { detectCity(); },
     'quick-theme': function (node) {
       var t = node.dataset.theme || '';
       if (t && val('filter-theme') === t) t = '';
