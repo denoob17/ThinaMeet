@@ -522,6 +522,7 @@
   /* ---------------- rendering: all ---------------- */
 
   function renderAll() {
+    updateFilterUi();
     renderParties();
     renderPlayers();
     renderVenueMini();
@@ -583,8 +584,9 @@
     state.filters.maxBudget = num(val('filter-budget'), 0);
   }
 
-  function doSearch() {
+  function doSearch(quiet) {
     readFilters();
+    updateFilterUi();
     el('party-list').innerHTML = loading('Searching parties…');
     el('player-list').innerHTML = loading('Searching players…');
     el('venue-mini-list').innerHTML = loading('Searching venues…');
@@ -595,7 +597,7 @@
         venues: res.venues || []
       };
       renderAll();
-      showToast('Found ' + state.results.parties.length + ' open ' +
+      if (quiet !== true) showToast('Found ' + state.results.parties.length + ' open ' +
         (state.results.parties.length === 1 ? 'party' : 'parties') + ' and ' +
         count(state.results.venues.length, 'venue') + ' in ' + state.filters.city + '.', 'success');
     }).catch(function (err) {
@@ -604,12 +606,107 @@
     });
   }
 
+  function toggleFilters() {
+    var bar = el('filter-bar');
+    var btn = el('filters-toggle');
+    if (!bar) return;
+    var open = bar.hidden;
+    bar.hidden = !open;
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open && el('filter-theme')) el('filter-theme').focus();
+  }
+
+  function updateFilterUi() {
+    readFilters();
+    var f = state.filters;
+    var active = (f.city !== 'All Cities' ? 1 : 0) + (f.theme ? 1 : 0) + (f.maxBudget > 0 ? 1 : 0);
+    var badge = el('filters-count');
+    if (badge) { badge.textContent = active; badge.hidden = active === 0; }
+    var clear = el('filters-clear');
+    if (clear) clear.hidden = active === 0;
+    Array.prototype.forEach.call(document.querySelectorAll('.qchip'), function (chip) {
+      chip.classList.toggle('active', (chip.dataset.theme || '') === f.theme);
+    });
+    var sum = el('results-summary');
+    if (sum) {
+      var p = state.results.parties.length, pl = state.results.players.length;
+      var bits = [];
+      if (f.city !== 'All Cities') bits.push(f.city);
+      if (f.theme) bits.push(f.theme);
+      if (f.maxBudget > 0) bits.push('up to $' + f.maxBudget);
+      sum.textContent = p + (p === 1 ? ' open party' : ' open parties') + ' \u00b7 ' + pl + (pl === 1 ? ' player' : ' players') +
+        (bits.length ? ' \u00b7 ' + bits.join(', ') : '');
+    }
+  }
+
+  /* ---------------- live identity (per tab) & notifications ---------------- */
+
+  var GUEST_KEY = 'crewparty.guestId';
+  var presenceTimer = null;
+
+  function renderIdentity(guest) {
+    el('identity-avatar').textContent = initials(guest.displayName);
+    el('identity-name').textContent = guest.displayName || 'Guest';
+    el('identity-sub').textContent = [guest.ageRole, guest.city].filter(Boolean).join(' \u00b7 ');
+  }
+
+  function initIdentity() {
+    var saved = null;
+    try { saved = window.sessionStorage.getItem(GUEST_KEY); } catch (e) { saved = null; }
+    window.CrewApi.sessionInit(saved, null).then(function (guest) {
+      state.guest = guest;
+      try { window.sessionStorage.setItem(GUEST_KEY, guest.guestId); } catch (e) { /* storage may be unavailable */ }
+      renderIdentity(guest);
+      pollPresence();
+      presenceTimer = window.setInterval(pollPresence, 5000);
+    }).catch(function () {
+      el('identity-name').textContent = 'Offline';
+      el('identity-sub').textContent = 'Backend not reachable';
+    });
+  }
+
+  function pollPresence() {
+    if (!state.guest) return;
+    window.CrewApi.presence(state.guest.guestId).then(renderNotifications).catch(function () { /* next tick retries */ });
+  }
+
+  function renderNotifications(p) {
+    var me = state.guest.guestId;
+    var items = [];
+    (p.pendingFriendRequests || []).forEach(function (r) {
+      if (r.toGuestId === me) items.push({ title: r.fromName + ' wants to join your crew', sub: 'Friend request' });
+    });
+    (p.pendingSlotInvites || []).forEach(function (i) {
+      if (i.toGuestId === me) items.push({ title: i.fromName + ' invited you to ' + (i.partyTitle || 'a party'), sub: i.venueName || 'Party invite' });
+    });
+    (p.acceptedFriends || []).forEach(function (r) {
+      var other = r.fromGuestId === me ? r.toName : r.fromName;
+      items.push({ title: other + ' is in your crew', sub: 'Accepted' });
+    });
+    var count = items.filter(function (i) { return i.sub !== 'Accepted'; }).length;
+    var badge = el('notif-count');
+    badge.textContent = count;
+    badge.hidden = count === 0;
+    var online = (p.onlineGuests || []).length;
+    el('notif-list').innerHTML = (items.length ? items.map(function (i) {
+      return '<div class="notif-item">' + escapeHtml(i.title) + '<small>' + escapeHtml(i.sub) + '</small></div>';
+    }).join('') : '<div class="notif-empty">No new notifications.</div>') +
+      '<div class="notif-empty">' + online + (online === 1 ? ' person' : ' people') + ' online now</div>';
+  }
+
+  function toggleNotif() {
+    var panel = el('notif-panel');
+    var open = panel.hidden;
+    panel.hidden = !open;
+    el('notif-bell').setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
   function resetFilters() {
     el('global-city').value = 'All Cities';
     el('filter-theme').value = '';
     el('filter-budget').value = '0';
-    showToast('Filters reset to All Cities, All Themes, no budget limit.', 'info');
-    return doSearch();
+    showToast('Filters cleared.', 'info');
+    return doSearch(true);
   }
 
   /* ---------------- create party ---------------- */
@@ -756,29 +853,6 @@
     }
     openCreateModal({ title: 'Crew Night with My Friends', buddyIds: buddyIds });
     showToast('Pick a theme and venue, then create your party.', 'info');
-  }
-
-  function runDemoPreset() {
-    var city = state.filters.city !== 'All Cities' ? state.filters.city : 'Chicago';
-    var buddies = state.friends.filter(function (f) {
-      return f.status === 'CORE_BUDDY' || f.status === 'FRIEND';
-    }).slice(0, 2).map(function (f) { return f.id; });
-    var venue = venuesForCity(city)[0];
-
-    openCreateModal({
-      title: 'Board Game Night — 2 Buddies Seeking 2 Players',
-      theme: 'Board Games',
-      city: city,
-      totalSlots: 4,
-      budgetMin: 10,
-      budgetMax: 30,
-      timeLabel: 'Sat 3:00 PM',
-      buddyIds: buddies,
-      venueId: venue ? venue.id : ''
-    });
-    // True 1-click demo: the pre-filled form is submitted immediately. If the request fails the
-    // modal stays open with the error, so the details can be fixed by hand.
-    submitCreate();
   }
 
   /* ---------------- chooser (join / invite) ---------------- */
@@ -1020,7 +1094,14 @@
 
   var CLICK_ACTIONS = {
     'switch-tab': function (node) { switchTab(node.dataset.tab); },
-    'demo': function () { runDemoPreset(); },
+    'toggle-filters': function () { toggleFilters(); },
+    'toggle-notif': function () { toggleNotif(); },
+    'quick-theme': function (node) {
+      var t = node.dataset.theme || '';
+      if (t && val('filter-theme') === t) t = '';
+      el('filter-theme').value = t;
+      doSearch(true);
+    },
     'open-paywall': function () { openPaywall(); },
     'close-modal': function (node) { closeModalFrom(node); },
     'start-pro': function (node) { startPro(node); },
@@ -1047,7 +1128,8 @@
   };
 
   var CHANGE_ACTIONS = {
-    'global-city': function () { readFilters(); doSearch(); },
+    'global-city': function () { doSearch(true); },
+    'filter-change': function () { doSearch(true); },
     'create-city': function () { fillVenueSelect(val('create-city')); },
     'create-venue': function () { syncVenueDetails(); },
     'venue-sort': function () { state.venueSort = val('venue-sort'); renderVenues(); },
@@ -1124,6 +1206,11 @@
     });
 
     loadBootstrap();
+    initIdentity();
+    document.addEventListener('click', function (e) {
+      var panel = el('notif-panel');
+      if (panel && !panel.hidden && !e.target.closest('.notif-wrap')) toggleNotif();
+    });
   }
 
   if (document.readyState === 'loading') {
