@@ -4,6 +4,8 @@ import java.util.List;
 
 /**
  * Payload sent by the "+ Create Party" modal.
+ * {@code venueId} may be blank when {@code midpointMode} is true: the crew then only picks a
+ * neighborhood, a budget window and a theme, and the backend auto-selects a fair midpoint spot.
  */
 public record CreatePartyRequest(
         String title,
@@ -15,7 +17,12 @@ public record CreatePartyRequest(
         int budgetMax,
         String timeLabel,
         String venueId,
-        List<String> buddyIds
+        List<String> buddyIds,
+        String guestId,
+        boolean midpointMode,
+        String format,
+        String pace,
+        boolean miniGroupPriority
 ) {
 
     public CreatePartyRequest {
