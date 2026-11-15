@@ -39,49 +39,45 @@
     </div>
 
     <div class="header-actions">
-      <label class="field-inline">
-        <span class="field-label">City</span>
-        <select id="global-city" class="select" data-action="global-city">
-          <option value="All Cities">All Cities</option>
-          <option value="Chicago">Chicago</option>
-          <option value="Austin">Austin</option>
-          <option value="Seattle">Seattle</option>
-          <option value="Washington, D.C.">Washington, D.C.</option>
-        </select>
-      </label>
-      <button class="btn btn-ghost btn-sm" id="detect-city-btn" data-action="detect-city" title="Use your browser location to find your city">&#128205; Detect My City</button>
       <button class="btn btn-primary" id="upgrade-btn" data-action="open-paywall">Upgrade ($9.99/mo)</button>
     </div>
   </div>
+
   <nav class="tabs" id="tabs" aria-label="Main sections">
-    <button class="tab active" data-action="switch-tab" data-tab="explore">Explore &amp; Search</button>
-    <button class="tab" data-action="switch-tab" data-tab="friends">Friends (Crew)</button>
+    <button class="tab active" data-action="switch-tab" data-tab="explore">Explore &amp; Map</button>
+    <button class="tab" data-action="switch-tab" data-tab="friends">Friends &amp; Live Invites</button>
     <button class="tab" data-action="switch-tab" data-tab="history">Visit History &amp; Ratings</button>
     <button class="tab" data-action="switch-tab" data-tab="venues">Rated Venues</button>
+    <button class="tab" data-action="switch-tab" data-tab="profile">Profile &amp; Settings</button>
   </nav>
 </header>
 
 <main class="page">
 
-  <!-- ============ TAB 1: EXPLORE & SEARCH ============ -->
+  <!-- ============ TAB 1: EXPLORE & MAP ============ -->
   <section class="view active" id="view-explore">
-    <div class="explore-grid">
-      <div class="explore-main">
-        <div class="explore-toolbar">
-          <button class="btn btn-ghost filters-btn" id="filters-toggle" data-action="toggle-filters" aria-expanded="false" aria-controls="filter-bar">
-            <span aria-hidden="true">&#9776;</span> Filters <span class="filters-count" id="filters-count" hidden>0</span>
-          </button>
-          <div class="quick-chips" id="quick-themes" role="group" aria-label="Quick theme filter">
-            <button class="qchip active" data-action="quick-theme" data-theme="">All</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Board Games">&#127922; Board Games</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Co-op Video Games">&#127918; Co-op Games</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Coworking &amp; Chill">&#9749; Coworking</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Trivia &amp; Social">&#127881; Trivia</button>
-            <button class="qchip" data-action="quick-theme" data-theme="Outdoor Casual">&#127795; Outdoor</button>
-          </div>
-          <button class="link-btn" id="filters-clear" data-action="reset-filters" hidden>Clear all</button>
+    <div class="explore-layout">
+
+      <aside class="filter-sidebar card" id="filter-sidebar" aria-label="Search filters" aria-hidden="true">
+        <div class="filter-sidebar-head">
+          <h3>Filters</h3>
+          <button class="icon-btn" data-action="close-filters" aria-label="Close filters">&times;</button>
         </div>
-        <div class="filter-bar card" id="filter-bar" hidden>
+        <div class="filter-group">
+          <div class="filter-group-title">Where</div>
+          <div class="field">
+            <label class="field-label" for="global-city">City</label>
+            <div class="city-row">
+              <select id="global-city" class="select" data-action="city-change">
+                <option value="All Cities">All Cities</option>
+                <option value="Chicago">Chicago</option>
+                <option value="Austin">Austin</option>
+                <option value="Seattle">Seattle</option>
+                <option value="Washington, D.C.">Washington, D.C.</option>
+              </select>
+              <button class="btn btn-accent btn-sm" data-action="gps-detect" title="Use my current location">Detect My City (GPS)</button>
+            </div>
+          </div>
           <div class="field">
             <label class="field-label" for="filter-theme">Theme</label>
             <select id="filter-theme" class="select" data-action="filter-change">
@@ -94,51 +90,145 @@
             </select>
           </div>
           <div class="field">
-            <label class="field-label" for="filter-budget">Max Budget ($)</label>
-            <input id="filter-budget" class="input" data-action="filter-change" type="number" min="0" step="1" value="0" placeholder="0 = no limit" />
-          </div>
-          <div class="filter-actions">
-            <button class="btn btn-primary" data-action="search">Apply</button>
-            <button class="btn btn-ghost" data-action="reset-filters">Reset</button>
-            <button class="btn btn-accent" data-action="open-create">+ Create Party</button>
+            <label class="field-label" for="filter-time">Time window</label>
+            <select id="filter-time" class="select" data-action="filter-change">
+              <option value="">Any time</option>
+              <option value="Tonight">Tonight</option>
+              <option value="Tomorrow">Tomorrow</option>
+              <option value="This weekend">This weekend</option>
+              <option value="This week">This week</option>
+            </select>
           </div>
         </div>
 
+        <div class="filter-group">
+          <div class="filter-group-title">Budget ($0 – $100)</div>
+          <div class="range-dual">
+            <div class="range-track"><div class="range-fill" id="budget-fill"></div></div>
+            <input type="range" data-action="filter-change" id="budget-min" min="0" max="100" step="5" value="0" aria-label="Minimum budget" />
+            <input type="range" data-action="filter-change" id="budget-max" min="0" max="100" step="5" value="100" aria-label="Maximum budget" />
+          </div>
+          <div class="range-readout"><span id="budget-readout">$0 – $100 per person</span></div>
+        </div>
+
+        <div class="filter-group">
+          <div class="filter-group-title">Who</div>
+          <div class="pill-group" id="format-pills" role="group" aria-label="Format">
+            <button type="button" class="pill active" data-action="pick-format" data-format="All">All</button>
+            <button type="button" class="pill" data-action="pick-format" data-format="Solo">Solo</button>
+            <button type="button" class="pill" data-action="pick-format" data-format="Couples">Couples</button>
+            <button type="button" class="pill" data-action="pick-format" data-format="Family">Family / Kids-Friendly</button>
+          </div>
+          <div class="pill-group" id="pace-pills" role="group" aria-label="Pace">
+            <button type="button" class="pill active" data-action="pick-pace" data-pace="All">All</button>
+            <button type="button" class="pill" data-action="pick-pace" data-pace="Chill">Passive / Chill</button>
+            <button type="button" class="pill" data-action="pick-pace" data-pace="Active">Active</button>
+          </div>
+        </div>
+
+        <div class="filter-group">
+          <div class="filter-group-title">Safety &amp; Trust</div>
+          <label class="switch-row">
+            <input type="checkbox" id="friends-only" data-action="filter-change" />
+            <span class="switch"></span>
+            <span class="switch-text">Where My Friends Are</span>
+          </label>
+          <label class="switch-row">
+            <input type="checkbox" id="public-safe" data-action="filter-change" />
+            <span class="switch"></span>
+            <span class="switch-text">Public-Only Safe Spots</span>
+          </label>
+          <label class="switch-row">
+            <input type="checkbox" id="verified-only" data-action="filter-change" />
+            <span class="switch"></span>
+            <span class="switch-text">Verified Profiles Only</span>
+          </label>
+          <label class="switch-row">
+            <input type="checkbox" id="mini-group-only" data-action="filter-change" />
+            <span class="switch"></span>
+            <span class="switch-text">Mini-Groups Priority (3–4 People/Couples)</span>
+          </label>
+        </div>
+
+        <div class="filter-actions-vertical">
+          <button class="btn btn-primary btn-block" data-action="search">Show results</button>
+          <button class="btn btn-ghost btn-block" data-action="reset-filters">Reset filters</button>
+          <button class="btn btn-accent btn-block" data-action="open-create">+ Create Party</button>
+        </div>
+      </aside>
+
+      <div class="explore-main">
+        <h2 class="section-title">Weekend Free &amp; Low-Budget Radar</h2>
+        <div id="radar-strip" class="radar-strip">
+          <div class="loading">Scanning this weekend's free events…</div>
+        </div>
+
+        <h2 class="section-title">Crew Map</h2>
+        <div class="map-panel card">
+          <div id="venue-map" class="venue-map" aria-label="Map of venues"></div>
+          <p class="map-hint">Pins simplify as you zoom out. Click any pin for its live slots, or click anywhere on the map to drop a custom spot.</p>
+        </div>
+
+        <div class="explore-toolbar">
+          <button class="btn btn-ghost filters-btn" id="filters-toggle" data-action="toggle-filters" aria-expanded="false" aria-controls="filter-sidebar">
+            <span aria-hidden="true">&#9776;</span> Filters <span class="filters-count" id="filters-count" hidden>0</span>
+          </button>
+          <div class="quick-chips" id="quick-themes" role="group" aria-label="Quick theme filter">
+            <button class="qchip active" data-action="quick-theme" data-theme="">All</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Board Games">&#127922; Board Games</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Co-op Video Games">&#127918; Co-op Games</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Coworking &amp; Chill">&#9749; Coworking</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Trivia &amp; Social">&#127881; Trivia</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Outdoor Casual">&#127795; Outdoor</button>
+          </div>
+          <button class="link-btn" id="filters-clear" data-action="reset-filters" hidden>Clear all</button>
+        </div>
         <h2 class="section-title">Open Parties</h2>
         <p class="results-summary" id="results-summary" aria-live="polite"></p>
         <div id="party-list" class="card-list">
           <div class="loading">Loading open parties…</div>
         </div>
 
-        <h2 class="section-title">Players you could meet</h2>
+        <h2 class="section-title">People you could meet</h2>
         <div id="player-list" class="card-list grid-2">
           <div class="loading">Loading players…</div>
         </div>
-      </div>
 
-      <aside class="explore-side">
-        <h2 class="section-title">Venues on the map</h2>
-        <div id="venue-map" class="venue-map" aria-label="Map of venues"></div>
-        <div id="venue-mini-list" class="mini-venue-list">
+        <h2 class="section-title">Venues</h2>
+        <div id="venue-mini-list" class="mini-venue-list grid-2">
           <div class="loading">Loading venues…</div>
         </div>
-      </aside>
+      </div>
     </div>
   </section>
 
-  <!-- ============ TAB 2: FRIENDS (CREW) ============ -->
+  <!-- ============ TAB 2: FRIENDS & LIVE INVITES ============ -->
   <section class="view" id="view-friends">
     <div class="view-head">
       <div>
-        <h2 class="section-title">Friends (Crew)</h2>
-        <p class="section-sub">Your core buddy, saved friends, and people you could still add.</p>
+        <h2 class="section-title">Friends &amp; Live Invites</h2>
+        <p class="section-sub">Everyone online right now is a real, separate browser tab — no accounts required.</p>
       </div>
       <button class="btn btn-accent" data-action="start-party-with-friends">Start Party with Friends</button>
     </div>
-    <div id="core-buddy-card" class="core-buddy-wrap"></div>
+
+    <h3 class="section-title section-title-sm">Online Users Nearby</h3>
+    <div id="online-list" class="card-list grid-2">
+      <div class="loading">Checking who's online…</div>
+    </div>
+
+    <h3 class="section-title section-title-sm">Friend Requests</h3>
+    <div id="friend-requests" class="card-list grid-2">
+      <div class="loading">Loading requests…</div>
+    </div>
+
+    <h3 class="section-title section-title-sm">Your Crew</h3>
     <div id="friends-list" class="card-list grid-2">
       <div class="loading">Loading your crew…</div>
     </div>
+
+    <h3 class="section-title section-title-sm">Invite to My Slot</h3>
+    <div id="invite-panel" class="card invite-panel"></div>
   </section>
 
   <!-- ============ TAB 3: VISIT HISTORY & RATINGS ============ -->
@@ -146,7 +236,7 @@
     <div class="view-head">
       <div>
         <h2 class="section-title">Visit History &amp; Ratings</h2>
-        <p class="section-sub">Rate the venue, tag the vibe, and add the people you just met.</p>
+        <p class="section-sub">Finish a hangout, then rate the venue and tag the vibe.</p>
       </div>
     </div>
     <div id="history-list" class="card-list">
@@ -159,7 +249,7 @@
     <div class="view-head">
       <div>
         <h2 class="section-title">Rated Venues</h2>
-        <p class="section-sub">Live ratings straight from the crew, sorted the way you like.</p>
+        <p class="section-sub">Live star ratings, active slot counts and public safe-spot badges.</p>
       </div>
       <div class="view-head-controls">
         <label class="field-inline">
@@ -167,6 +257,8 @@
           <select id="venue-sort" class="select" data-action="venue-sort">
             <option value="rating">Rating</option>
             <option value="price">Price</option>
+            <option value="slots">Active slots</option>
+            <option value="name">Name</option>
           </select>
         </label>
         <label class="field-inline">
@@ -186,7 +278,235 @@
     </div>
   </section>
 
+  <!-- ============ TAB 5: PROFILE & SETTINGS ============ -->
+  <section class="view" id="view-profile">
+    <div class="view-head">
+      <div>
+        <h2 class="section-title">Profile &amp; Settings</h2>
+        <p class="section-sub">These defaults shape your matching, your safety filters and your invites.</p>
+      </div>
+    </div>
+
+    <form id="profile-form" class="card profile-card" novalidate>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label" for="profile-name">Display name</label>
+          <input id="profile-name" class="input" type="text" placeholder="e.g. Jordan Vance" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="profile-age">Age</label>
+          <input id="profile-age" class="input" type="number" min="25" max="45" step="1" placeholder="29" />
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label" for="profile-role">Role / bio</label>
+          <input id="profile-role" class="input" type="text" placeholder="e.g. UX Designer" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="profile-city">City</label>
+          <select id="profile-city" class="select">
+            <option value="Chicago">Chicago</option>
+            <option value="Austin">Austin</option>
+            <option value="Seattle">Seattle</option>
+            <option value="Washington, D.C.">Washington, D.C.</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label" for="profile-neighborhood">Home neighborhood / ZIP</label>
+          <input id="profile-neighborhood" class="input" type="text" placeholder="e.g. Logan Square" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="profile-format">Preferred format</label>
+          <select id="profile-format" class="select">
+            <option value="Solo">Solo</option>
+            <option value="Couples">Couples</option>
+            <option value="Family">Family</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="profile-pace">Preferred pace</label>
+          <select id="profile-pace" class="select">
+            <option value="Chill">Chill</option>
+            <option value="Active">Active</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label" for="profile-budget-min">Default budget min $</label>
+          <input id="profile-budget-min" class="input" type="number" min="0" step="1" value="0" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="profile-budget-max">Default budget max $</label>
+          <input id="profile-budget-max" class="input" type="number" min="0" step="1" value="40" />
+        </div>
+      </div>
+
+      <div class="field-grid-2">
+        <label class="check-row">
+          <input type="checkbox" id="profile-id" />
+          <span>ID Verified badge</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="profile-linkedin" />
+          <span>LinkedIn Verified badge</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="profile-public" />
+          <span>Public-Only Safe Spots by default</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="profile-minigroup" />
+          <span>Mini-Group Priority</span>
+        </label>
+      </div>
+
+      <div class="modal-footer">
+        <button type="submit" class="btn btn-primary">Save profile</button>
+      </div>
+    </form>
+  </section>
+
 </main>
+
+<!-- ============ DRAWER: VENUE SLOTS ============ -->
+<div class="filters-scrim" id="filters-scrim" data-action="close-filters" hidden></div>
+<div class="drawer-scrim" id="drawer-scrim" data-action="close-drawer" hidden></div>
+<aside class="drawer" id="venue-drawer" aria-hidden="true" aria-label="Venue slots">
+  <header class="drawer-head">
+    <div>
+      <h3 id="drawer-title">Venue</h3>
+      <p class="drawer-sub" id="drawer-sub"></p>
+    </div>
+    <button class="icon-btn" data-action="close-drawer" aria-label="Close">&times;</button>
+  </header>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<!-- ============ MODAL: CREATE PARTY ============ -->
+<div class="modal" id="create-modal">
+  <div class="modal-backdrop" data-action="close-modal"></div>
+  <div class="modal-panel modal-panel-wide" role="dialog" aria-modal="true" aria-labelledby="create-modal-title">
+    <header class="modal-header">
+      <h3 id="create-modal-title">Create a Party</h3>
+      <button class="icon-btn" data-action="close-modal" aria-label="Close">&times;</button>
+    </header>
+    <div class="modal-body">
+      <form id="create-form" novalidate>
+        <div class="field">
+          <label class="field-label" for="create-title">Title</label>
+          <input id="create-title" class="input" type="text" placeholder="e.g. Friday Night Board Games" />
+        </div>
+
+        <label class="check-row check-row-strong">
+          <input type="checkbox" id="create-midpoint" data-action="toggle-midpoint" />
+          <span>No venue selected — auto-pick Fair-Midpoint between members</span>
+        </label>
+        <p class="hint" id="midpoint-hint" hidden>CrewParty will average everyone's location and lock the closest public safe spot that fits your budget once people join.</p>
+
+        <div class="field-row">
+          <div class="field">
+            <label class="field-label" for="create-theme">Theme</label>
+            <select id="create-theme" class="select"></select>
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-city">City</label>
+            <select id="create-city" class="select" data-action="create-city"></select>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label class="field-label" for="create-neighborhood">Neighborhood / ZIP</label>
+            <input id="create-neighborhood" class="input" type="text" placeholder="e.g. Logan Square" />
+          </div>
+          <div class="field" id="create-venue-field">
+            <label class="field-label" for="create-venue">Venue</label>
+            <select id="create-venue" class="select" data-action="create-venue"></select>
+          </div>
+        </div>
+
+        <div class="field" id="create-custom-spot-field">
+          <label class="field-label" for="create-spot-name">Custom spot name</label>
+          <input id="create-spot-name" class="input" type="text" placeholder="e.g. Riverside Courts / Elm Street Park" />
+          <p class="hint">Use this when you clicked an unnamed spot on the map. CrewParty will auto-match the closest public safe venue for the exact party location.</p>
+        </div>
+
+        <div class="field-row field-row-3">
+          <div class="field">
+            <label class="field-label" for="create-slots">Total slots</label>
+            <input id="create-slots" class="input" type="number" min="2" max="8" step="1" value="4" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-budget-min">Budget min $</label>
+            <input id="create-budget-min" class="input" type="number" min="0" step="1" value="10" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-budget-max">Budget max $</label>
+            <input id="create-budget-max" class="input" type="number" min="0" step="1" value="30" />
+          </div>
+        </div>
+
+        <div class="field-row field-row-3">
+          <div class="field">
+            <label class="field-label" for="create-time">Time label</label>
+            <input id="create-time" class="input" type="text" placeholder="e.g. Sat 3:00 PM" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-format">Format</label>
+            <select id="create-format" class="select">
+              <option value="Solo">Solo</option>
+              <option value="Couples">Couples</option>
+              <option value="Family">Family</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-pace">Pace</label>
+            <select id="create-pace" class="select">
+              <option value="Chill">Chill</option>
+              <option value="Active">Active</option>
+            </select>
+          </div>
+        </div>
+
+        <label class="check-row">
+          <input type="checkbox" id="create-minigroup" />
+          <span>Mini-group priority (3–4 people / couples)</span>
+        </label>
+
+        <div class="field">
+          <span class="field-label">Invite your buddies</span>
+          <div id="create-buddies" class="check-list"></div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create Party</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: CHOOSER ============ -->
+<div class="modal" id="chooser-modal">
+  <div class="modal-backdrop" data-action="close-modal"></div>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="chooser-title">
+    <header class="modal-header">
+      <h3 id="chooser-title">Choose</h3>
+      <button class="icon-btn" data-action="close-modal" aria-label="Close">&times;</button>
+    </header>
+    <div class="modal-body">
+      <div id="chooser-list" class="chooser-list"></div>
+    </div>
+  </div>
+</div>
 
 <!-- ============ MODAL: PAYWALL ============ -->
 <div class="modal" id="paywall-modal">
@@ -232,85 +552,7 @@
   </div>
 </div>
 
-<!-- ============ MODAL: CREATE PARTY ============ -->
-<div class="modal" id="create-modal">
-  <div class="modal-backdrop" data-action="close-modal"></div>
-  <div class="modal-panel modal-panel-wide" role="dialog" aria-modal="true" aria-labelledby="create-modal-title">
-    <header class="modal-header">
-      <h3 id="create-modal-title">Create a Party</h3>
-      <button class="icon-btn" data-action="close-modal" aria-label="Close">&times;</button>
-    </header>
-    <div class="modal-body">
-      <form id="create-form" novalidate>
-        <div class="field">
-          <label class="field-label" for="create-title">Title</label>
-          <input id="create-title" class="input" type="text" placeholder="e.g. Friday Night Board Games" />
-        </div>
-        <div class="field-row">
-          <div class="field">
-            <label class="field-label" for="create-theme">Theme</label>
-            <select id="create-theme" class="select"></select>
-          </div>
-          <div class="field">
-            <label class="field-label" for="create-city">City</label>
-            <select id="create-city" class="select" data-action="create-city"></select>
-          </div>
-        </div>
-        <div class="field-row">
-          <div class="field">
-            <label class="field-label" for="create-neighborhood">Neighborhood</label>
-            <input id="create-neighborhood" class="input" type="text" placeholder="e.g. Logan Square" />
-          </div>
-          <div class="field">
-            <label class="field-label" for="create-venue">Venue</label>
-            <select id="create-venue" class="select" data-action="create-venue"></select>
-          </div>
-        </div>
-        <div class="field-row field-row-3">
-          <div class="field">
-            <label class="field-label" for="create-slots">Total slots</label>
-            <input id="create-slots" class="input" type="number" min="2" max="8" step="1" value="4" />
-          </div>
-          <div class="field">
-            <label class="field-label" for="create-budget-min">Budget min $</label>
-            <input id="create-budget-min" class="input" type="number" min="0" step="1" value="10" />
-          </div>
-          <div class="field">
-            <label class="field-label" for="create-budget-max">Budget max $</label>
-            <input id="create-budget-max" class="input" type="number" min="0" step="1" value="30" />
-          </div>
-        </div>
-        <div class="field">
-          <label class="field-label" for="create-time">Time label</label>
-          <input id="create-time" class="input" type="text" placeholder="e.g. Sat 3:00 PM" />
-        </div>
-        <div class="field">
-          <span class="field-label">Invite your buddies</span>
-          <div id="create-buddies" class="check-list"></div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button>
-          <button type="submit" class="btn btn-primary">Create Party</button>
-        </div>
-      </form>
-    </div>
-  </div>
-</div>
-
-<!-- ============ MODAL: PARTY / FRIEND CHOOSER ============ -->
-<div class="modal" id="chooser-modal">
-  <div class="modal-backdrop" data-action="close-modal"></div>
-  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="chooser-title">
-    <header class="modal-header">
-      <h3 id="chooser-title">Choose</h3>
-      <button class="icon-btn" data-action="close-modal" aria-label="Close">&times;</button>
-    </header>
-    <div class="modal-body">
-      <div id="chooser-list" class="chooser-list"></div>
-    </div>
-  </div>
-</div>
-
+<div id="banner-area" class="banner-area" aria-live="assertive"></div>
 <div id="toast-area" class="toast-area" aria-live="polite" aria-atomic="false"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>

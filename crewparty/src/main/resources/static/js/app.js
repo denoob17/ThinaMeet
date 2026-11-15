@@ -1,43 +1,66 @@
-/* CrewParty — application state, rendering and event wiring. */
-(function () {
+/* CrewParty — application state, rendering and event wiring (Vanilla ES6+).
+   Zero-login multi-tab identities, live presence polling, an interactive map, a filter
+   sidebar with a weekly free-event radar, and five fully wired navigation tabs. */
+(() => {
   'use strict';
 
-  var THEMES = ['Board Games', 'Co-op Video Games', 'Coworking & Chill', 'Trivia & Social', 'Outdoor Casual'];
-  var CITIES = ['Chicago', 'Austin', 'Seattle', 'Washington, D.C.'];
-  var VIBE_TAGS = ['Great Wi-Fi', 'Budget Friendly', 'Quiet Enough to Talk', 'Great Table Space', 'Craft Drinks', 'Late Night'];
-  var TABS = ['explore', 'friends', 'history', 'venues'];
-  var PRO_KEY = 'crewparty.pro';
+  /* ---------------- constants ---------------- */
 
-  var THEME_HINTS = {
-    'Great Wi-Fi': 'Coworking & Chill',
-    'Budget Friendly': 'Board Games',
-    'Quiet Enough to Talk': 'Trivia & Social',
-    'Great Table Space': 'Board Games',
-    'Craft Drinks': 'Trivia & Social',
-    'Late Night': 'Co-op Video Games'
+  const THEMES = ['Board Games', 'Co-op Video Games', 'Coworking & Chill', 'Trivia & Social', 'Outdoor Casual'];
+  const CITIES = ['Chicago', 'Austin', 'Seattle', 'Washington, D.C.'];
+  const VIBE_TAGS = ['Great Wi-Fi', 'Budget Friendly', 'Quiet Enough to Talk', 'Great Table Space', 'Craft Drinks', 'Late Night'];
+  const TABS = ['explore', 'friends', 'history', 'venues', 'profile'];
+  const PRO_KEY = 'crewparty.pro';
+  const SESSION_ID_KEY = 'crewparty.guestId';
+  const PRESENCE_MS = 2500;
+
+  /** Radar categories mapped onto a crew theme so "Start Party Here" pre-fills correctly. */
+  const RADAR_THEME = {
+    'Free Museum Day': 'Trivia & Social',
+    'Local Fair': 'Outdoor Casual',
+    'Public Park Meetup': 'Outdoor Casual'
   };
 
-  var state = {
+  /* ---------------- state ---------------- */
+
+  const state = {
+    identity: null,
+    presence: { onlineGuests: [], acceptedFriends: [], pendingFriendRequests: [], pendingSlotInvites: [] },
+    pending: [],                 // normalized actionable notifications
+    dismissedRequests: new Set(),
     friends: [],
     venues: [],
     openParties: [],
     visitHistory: [],
     results: { parties: [], players: [], venues: [] },
-    filters: { city: 'All Cities', theme: '', maxBudget: 0 },
+    radar: [],
+    filters: {
+      city: 'All Cities', theme: '', timeWindow: '',
+      budgetMin: 0, budgetMax: 100,
+      format: 'All', pace: 'All',
+      friendsOnly: false, publicSafeOnly: false, verifiedOnly: false, miniGroupOnly: false
+    },
     venueCity: 'All Cities',
     venueSort: 'rating',
     tab: 'explore',
     pro: false,
-    addedIds: {},          // friendId -> true
-    drafts: {},            // visitId -> { rating: number, tags: string[] }
-    chooser: null,         // { mode: 'join'|'invite', partyId?, friendId? }
+    drafts: {},                  // visitId -> { rating, tags }
+    chooser: null,               // { mode, guestId?, partyId? }
     highlightVisitId: null,
+    selectedSpot: null,          // { lat, lng, name } dropped on the map
     loaded: false
   };
 
-  /* ---------------- helpers ---------------- */
+  /* ---------------- small helpers ---------------- */
 
-  function escapeHtml(value) {
+  const el = (id) => document.getElementById(id);
+  const val = (id) => { const node = el(id); return node ? node.value : ''; };
+  const num = (value, fallback) => { const parsed = parseInt(value, 10); return isNaN(parsed) ? fallback : parsed; };
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const myId = () => (state.identity ? state.identity.guestId : '');
+  const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+
+  const escapeHtml = (value) => {
     if (value === null || value === undefined) return '';
     return String(value)
       .replace(/&/g, '&amp;')
@@ -45,496 +68,740 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
-  }
+  };
+  const attr = (value) => String(value === null || value === undefined ? '' : value).replace(/["\\]/g, '');
 
-  function attr(value) {
-    return String(value === null || value === undefined ? '' : value).replace(/["\\]/g, '');
-  }
+  const initials = (name) => String(name || '?').trim().split(/\s+/).slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase()).join('');
 
-  function el(id) {
-    return document.getElementById(id);
-  }
-
-  function val(id) {
-    var node = el(id);
-    return node ? node.value : '';
-  }
-
-  function num(value, fallback) {
-    var parsed = parseInt(value, 10);
-    return isNaN(parsed) ? fallback : parsed;
-  }
-
-  function count(n, noun) {
-    return n + ' ' + noun + (n === 1 ? '' : 's');
-  }
-
-  function initials(name) {
-    var parts = String(name || '?').trim().split(/\s+/).slice(0, 2);
-    return parts.map(function (p) { return p.charAt(0).toUpperCase(); }).join('');
-  }
-
-  function starGlyphs(rating) {
-    var out = '';
-    for (var i = 1; i <= 5; i++) {
-      out += i <= rating ? '★' : '<span class="off">★</span>';
-    }
+  const starGlyphs = (rating) => {
+    let out = '';
+    for (let i = 1; i <= 5; i++) out += i <= rating ? '\u2605' : '<span class="off">\u2605</span>';
     return out;
-  }
+  };
 
-  function themeChips(themes) {
-    return (themes || []).map(function (t) {
-      return '<span class="chip">' + escapeHtml(t) + '</span>';
-    }).join('');
-  }
+  const chips = (list) => (list || []).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join('');
+  const loading = (text) => `<div class="loading">${escapeHtml(text)}</div>`;
+  const emptyState = (title, text) =>
+    `<div class="empty"><span class="empty-title">${escapeHtml(title)}</span>${escapeHtml(text)}</div>`;
 
-  function emptyState(title, text) {
-    return '<div class="empty"><span class="empty-title">' + escapeHtml(title) + '</span>' + escapeHtml(text) + '</div>';
-  }
+  /** Great-circle distance in km — used for the client-side "nearest venue" spot matching. */
+  const haversineKm = (lat1, lng1, lat2, lng2) => {
+    const toRad = (d) => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) ** 2
+      + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
 
-  function loading(text) {
-    return '<div class="loading">' + escapeHtml(text) + '</div>';
-  }
+  const findVenue = (venueId) => state.venues.find((v) => String(v.id) === String(venueId)) || null;
+  const findParty = (partyId) => allOpenParties().find((p) => String(p.id) === String(partyId)) || null;
+  const findGuestById = (guestId) =>
+    (state.presence.onlineGuests || []).find((g) => g.guestId === guestId) || null;
 
-  function findParty(id) {
-    var all = state.results.parties.concat(state.openParties);
-    for (var i = 0; i < all.length; i++) {
-      if (String(all[i].id) === String(id)) return all[i];
-    }
-    return null;
-  }
+  const allOpenParties = () => {
+    const seen = {};
+    const list = [];
+    [...state.openParties, ...state.results.parties].forEach((p) => {
+      if (p && !seen[p.id]) { seen[p.id] = true; list.push(p); }
+    });
+    return list;
+  };
 
-  function findFriend(id) {
-    for (var i = 0; i < state.friends.length; i++) {
-      if (String(state.friends[i].id) === String(id)) return state.friends[i];
-    }
-    return null;
-  }
+  const mySlots = () => allOpenParties().filter((p) => (p.memberGuestIds || []).includes(myId()));
 
-  function friendByName(name) {
-    var target = String(name || '').trim().toLowerCase();
-    if (!target) return null;
-    for (var i = 0; i < state.friends.length; i++) {
-      if (String(state.friends[i].name || '').trim().toLowerCase() === target) return state.friends[i];
-    }
-    return null;
-  }
+  const acceptedFriendIds = () => {
+    const ids = new Set();
+    (state.presence.acceptedFriends || []).forEach((relation) => {
+      ids.add(relation.fromGuestId === myId() ? relation.toGuestId : relation.fromGuestId);
+    });
+    return ids;
+  };
 
-  function venuesForCity(city) {
-    if (!city || city === 'All Cities') return state.venues;
-    var filtered = state.venues.filter(function (v) { return v.city === city; });
-    return filtered.length ? filtered : state.venues;
-  }
+  const nearestVenue = (lat, lng) => {
+    let best = null;
+    let bestDistance = Infinity;
+    state.venues.forEach((v) => {
+      if (typeof v.lat !== 'number' || typeof v.lng !== 'number') return;
+      const d = haversineKm(lat, lng, v.lat, v.lng);
+      if (d < bestDistance) { bestDistance = d; best = v; }
+    });
+    return best;
+  };
 
-  /* ---------------- toasts ---------------- */
+  /* ---------------- toasts & banners ---------------- */
 
-  function showToast(message, type) {
-    var area = el('toast-area');
+  const showToast = (message, type) => {
+    const area = el('toast-area');
     if (!area) return;
-    var toast = document.createElement('div');
-    toast.className = 'toast toast-' + (type || 'info');
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type || 'info'}`;
     toast.textContent = message;
     area.appendChild(toast);
-    var life = type === 'error' ? 6500 : 4200;
-    window.setTimeout(function () {
+    const life = type === 'error' ? 6500 : 4200;
+    window.setTimeout(() => {
       toast.classList.add('toast-out');
-      window.setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 320);
+      window.setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 320);
     }, life);
-  }
+  };
 
-  /* ---------------- modals ---------------- */
+  const dismissBanner = (node) => {
+    const banner = node && node.closest ? node.closest('.banner') : null;
+    if (!banner) return;
+    banner.classList.add('banner-out');
+    window.setTimeout(() => { if (banner.parentNode) banner.parentNode.removeChild(banner); }, 320);
+  };
 
-  function openModal(id) {
-    var modal = el(id);
+  const removeBanner = (key) => {
+    const node = document.querySelector(`.banner[data-banner-key="${attr(key)}"]`);
+    if (node) dismissBanner(node);
+  };
+
+  const showBanner = (notification) => {
+    const area = el('banner-area');
+    if (!area) return;
+    removeBanner(notification.key);
+    area.insertAdjacentHTML('afterbegin', bannerHtml(notification));
+    while (area.children.length > 3) area.removeChild(area.lastElementChild);
+  };
+
+  const bannerHtml = (n) => {
+    if (n.kind === 'invite') {
+      const inv = n.invite;
+      return `<div class="banner" data-banner-key="${attr(n.key)}">
+        <div class="banner-title">Slot invitation</div>
+        <div class="banner-sub"><strong>${escapeHtml(inv.fromName)}</strong> invited you to <strong>${escapeHtml(inv.partyTitle)}</strong>.</div>
+        ${inv.venueName ? `<div class="banner-meta">at ${escapeHtml(inv.venueName)}</div>` : ''}
+        <div class="banner-actions">
+          <button class="btn btn-primary btn-sm" data-action="accept-invite" data-invite-id="${attr(inv.id)}">Accept &amp; Join</button>
+          <button class="btn btn-ghost btn-sm" data-action="decline-invite" data-invite-id="${attr(inv.id)}">Decline</button>
+        </div>
+      </div>`;
+    }
+    const req = n.request;
+    return `<div class="banner" data-banner-key="${attr(n.key)}">
+      <div class="banner-title">Friend request</div>
+      <div class="banner-sub"><strong>${escapeHtml(req.fromName)}</strong> wants to join your crew.</div>
+      <div class="banner-actions">
+        <button class="btn btn-primary btn-sm" data-action="accept-friend" data-request-id="${attr(req.id)}">Accept</button>
+        <button class="btn btn-ghost btn-sm" data-action="decline-friend" data-request-id="${attr(req.id)}">Decline</button>
+      </div>
+    </div>`;
+  };
+
+  const notifItemHtml = (n) => {
+    if (n.kind === 'invite') {
+      const inv = n.invite;
+      return `<div class="notif-item">
+        <div class="notif-item-title">Slot invitation</div>
+        <div class="notif-item-sub"><strong>${escapeHtml(inv.fromName)}</strong> invited you to ${escapeHtml(inv.partyTitle)}${inv.venueName ? ` at ${escapeHtml(inv.venueName)}` : ''}.</div>
+        <div class="notif-item-actions">
+          <button class="btn btn-primary btn-sm" data-action="accept-invite" data-invite-id="${attr(inv.id)}">Accept &amp; Join</button>
+          <button class="btn btn-ghost btn-sm" data-action="decline-invite" data-invite-id="${attr(inv.id)}">Decline</button>
+        </div>
+      </div>`;
+    }
+    const req = n.request;
+    return `<div class="notif-item">
+      <div class="notif-item-title">Friend request</div>
+      <div class="notif-item-sub"><strong>${escapeHtml(req.fromName)}</strong> wants to join your crew.</div>
+      <div class="notif-item-actions">
+        <button class="btn btn-primary btn-sm" data-action="accept-friend" data-request-id="${attr(req.id)}">Accept</button>
+        <button class="btn btn-ghost btn-sm" data-action="decline-friend" data-request-id="${attr(req.id)}">Decline</button>
+      </div>
+    </div>`;
+  };
+
+  /* ---------------- modals & drawer ---------------- */
+
+  const openModal = (id) => {
+    const modal = el(id);
     if (!modal) return;
     modal.classList.add('open');
     document.body.classList.add('modal-open');
-    var focusable = modal.querySelector('input, select, button');
-    if (focusable) window.setTimeout(function () { focusable.focus(); }, 40);
-  }
+    const focusable = modal.querySelector('input, select, button');
+    if (focusable) window.setTimeout(() => focusable.focus(), 40);
+  };
 
-  function closeModalFrom(node) {
-    var modal = node && node.closest ? node.closest('.modal') : null;
+  const closeModalFrom = (node) => {
+    const modal = node && node.closest ? node.closest('.modal') : null;
     if (modal) modal.classList.remove('open');
     if (!document.querySelector('.modal.open')) document.body.classList.remove('modal-open');
-  }
+  };
 
-  function closeAllModals() {
-    Array.prototype.forEach.call(document.querySelectorAll('.modal.open'), function (m) {
-      m.classList.remove('open');
-    });
+  const closeAllModals = () => {
+    document.querySelectorAll('.modal.open').forEach((m) => m.classList.remove('open'));
     document.body.classList.remove('modal-open');
-  }
+  };
+
+  const openDrawer = () => {
+    el('drawer-scrim').hidden = false;
+    const drawer = el('venue-drawer');
+    drawer.classList.add('open');
+    drawer.setAttribute('aria-hidden', 'false');
+  };
+
+  const closeDrawer = () => {
+    el('drawer-scrim').hidden = true;
+    const drawer = el('venue-drawer');
+    drawer.classList.remove('open');
+    drawer.setAttribute('aria-hidden', 'true');
+  };
+
+  /* ---------------- identity (per-tab, zero login) ---------------- */
+
+  const initIdentity = async () => {
+    let storedId = null;
+    try { storedId = window.sessionStorage.getItem(SESSION_ID_KEY); } catch (e) { storedId = null; }
+
+    const session = await window.CrewApi.sessionInit(storedId, null);
+    state.identity = session;
+    try {
+      window.sessionStorage.setItem(SESSION_ID_KEY, session.guestId);
+      window.sessionStorage.setItem('crewparty.guestName', session.displayName || '');
+    } catch (e) { /* sessionStorage may be unavailable */ }
+    applyProfileDefaults();
+    renderIdentity();
+  };
+
+  const applyProfileDefaults = () => {
+    const s = state.identity;
+    if (!s) return;
+    state.filters.publicSafeOnly = !!s.publicVenuesOnly;
+    el('public-safe').checked = !!s.publicVenuesOnly;
+    state.filters.miniGroupOnly = !!s.miniGroupPriority;
+    el('mini-group-only').checked = !!s.miniGroupPriority;
+  };
+
+  const renderIdentity = () => {
+    const s = state.identity;
+    if (!s) return;
+    const age = String(s.ageRole || '').split('\u2022')[0].trim();
+    el('identity-avatar').textContent = initials(s.displayName);
+    el('identity-name').textContent = `${s.displayName}${age ? ` (${age})` : ''}`;
+    el('identity-sub').textContent = [s.neighborhood, s.city, s.format, s.pace]
+      .filter(Boolean).join(' \u2022 ');
+  };
+
+  /* ---------------- presence polling & notifications ---------------- */
+
+  const startPresencePolling = () => {
+    pollPresence();
+    window.setInterval(pollPresence, PRESENCE_MS);
+  };
+
+  const pollPresence = async () => {
+    if (!state.identity) return;
+    try {
+      const presence = await window.CrewApi.presence(myId());
+      state.presence = presence;
+      if (presence.currentGuest) {
+        state.identity = { ...state.identity, ...presence.currentGuest };
+        renderIdentity();
+      }
+      handleNotifications(presence);
+      renderPresence();
+    } catch (e) {
+      /* keep polling silently so a blip never spams the UI */
+    }
+  };
+
+  const handleNotifications = (presence) => {
+    const pending = [];
+    (presence.pendingSlotInvites || []).forEach((invite) => {
+      pending.push({ key: `invite:${invite.id}`, kind: 'invite', invite });
+    });
+    (presence.pendingFriendRequests || []).forEach((request) => {
+      if (state.dismissedRequests.has(request.id)) return;
+      pending.push({ key: `req:${request.id}`, kind: 'friend', request });
+    });
+    state.pending = pending;
+
+    const bell = el('notif-count');
+    bell.textContent = pending.length;
+    bell.hidden = pending.length === 0;
+
+    renderNotifPanel(pending);
+
+    pending.forEach((n) => {
+      if (state.seenKeys && state.seenKeys.has(n.key)) return;
+      if (!state.seenKeys) state.seenKeys = new Set();
+      state.seenKeys.add(n.key);
+      showBanner(n);
+    });
+  };
+
+  const renderNotifPanel = (pending) => {
+    const list = el('notif-list');
+    if (!list) return;
+    list.innerHTML = pending.length
+      ? pending.map(notifItemHtml).join('')
+      : '<div class="notif-empty">You are all caught up.</div>';
+  };
+
+  const toggleNotif = (node) => {
+    const panel = el('notif-panel');
+    const open = panel.hidden;
+    panel.hidden = !open;
+    node.setAttribute('aria-expanded', String(open));
+  };
 
   /* ---------------- data loading ---------------- */
 
-  function applyBootstrap(data) {
+  const applyBootstrap = (data) => {
     state.friends = data.friends || [];
     state.venues = data.venues || [];
     state.openParties = data.openParties || [];
     state.visitHistory = data.visitHistory || [];
-    state.results = {
-      parties: state.openParties.slice(),
-      players: state.friends.filter(function (f) { return f.status === 'DISCOVER'; }),
-      venues: state.venues.slice()
-    };
-  }
+  };
 
-  function reloadData() {
-    return window.CrewApi.bootstrap().then(function (data) {
-      applyBootstrap(data);
-      return data;
-    });
-  }
+  const reloadAll = async () => {
+    applyBootstrap(await window.CrewApi.bootstrap());
+  };
 
-  function setLoadingPlaceholders() {
-    el('party-list').innerHTML = loading('Loading open parties…');
-    el('player-list').innerHTML = loading('Loading players…');
-    el('venue-mini-list').innerHTML = loading('Loading venues…');
-    el('friends-list').innerHTML = loading('Loading your crew…');
-    el('history-list').innerHTML = loading('Loading visit history…');
-    el('venue-list').innerHTML = loading('Loading venues…');
-  }
+  const loadRadar = async () => {
+    state.filters.city = val('global-city') || 'All Cities';
+    const city = state.filters.city === 'All Cities' ? '' : state.filters.city;
+    try {
+      state.radar = await window.CrewApi.radar(city, state.filters.budgetMax);
+    } catch (e) {
+      state.radar = [];
+    }
+    renderRadar();
+  };
 
-  function loadBootstrap() {
-    setLoadingPlaceholders();
-    return reloadData().then(function () {
-      state.loaded = true;
-      renderAll();
-    }).catch(function (err) {
-      state.loaded = true;
-      renderAll();
-      showToast('Could not load CrewParty data: ' + err.message, 'error');
-    });
-  }
+  /** Reload everything after a mutation and refresh the views. */
+  const refreshAfterChange = async (message) => {
+    await reloadAll();
+    await doSearch({ silent: true });
+    await loadRadar();
+    await pollPresence();
+    renderAll();
+    if (message) showToast(message, 'success');
+  };
+
+  /* ---------------- rendering: identity extras ---------------- */
+
+  const isJoined = (party) => (party.memberGuestIds || []).includes(myId());
+
+  const friendsInsideParty = (party) => {
+    const friends = acceptedFriendIds();
+    return (party.memberGuestIds || []).filter((id) => friends.has(id)).length;
+  };
+
+  const partyFlags = (p) => {
+    const venue = findVenue(p.venueId);
+    const inside = friendsInsideParty(p);
+    return [
+      p.demoPool ? '<span class="badge badge-demo">Demo Pool</span>' : '',
+      p.midpointMode ? '<span class="badge badge-midpoint">Fair-Midpoint Auto-Matched</span>' : '',
+      inside > 0 ? `<span class="badge badge-friends">${inside} friend${inside === 1 ? '' : 's'} inside</span>` : '',
+      venue && venue.publicSafeSpot ? '<span class="badge badge-safe">Public Safe Spot</span>' : '',
+      venue && venue.featuredPartner ? '<span class="badge badge-featured">Featured Partner</span>' : '',
+      (p.trustBadges || []).map((b) => `<span class="badge badge-trust">${escapeHtml(b)}</span>`).join('')
+    ].filter(Boolean).join('');
+  };
 
   /* ---------------- rendering: parties ---------------- */
 
-  function partyCard(p) {
-    var full = p.filledSlots >= p.totalSlots;
-    var fit = Math.max(0, Math.min(100, num(p.fitScore, 0)));
-    var members = (p.members || []).map(function (m) {
-      return '<span class="chip">' + escapeHtml(m) + '</span>';
-    }).join('');
-    var icebreakers = (p.icebreakers || []).map(function (i) {
-      return '<li>' + escapeHtml(i) + '</li>';
-    }).join('');
+  const partyCard = (p) => {
+    const full = p.filledSlots >= p.totalSlots;
+    const fit = clamp(num(p.fitScore, 0), 0, 100);
+    const distance = num(p.distanceKm, 0);
+    const joined = isJoined(p);
+    const checkedIn = (p.checkedInGuestIds || []).includes(myId());
+    const members = (p.memberNames && p.memberNames.length ? p.memberNames : p.members || [])
+      .map((m) => `<span class="chip">${escapeHtml(m)}</span>`).join('');
+    const icebreakers = (p.icebreakers || []).map((i) => `<li>${escapeHtml(i)}</li>`).join('');
 
-    return '' +
-      '<article class="card party-card" data-party-id="' + escapeHtml(p.id) + '">' +
-        '<div class="card-head">' +
-          '<h3 class="card-title">' + escapeHtml(p.title) + '</h3>' +
-          '<span class="badge badge-theme">' + escapeHtml(p.theme) + '</span>' +
-        '</div>' +
-        '<div class="meta-row">' +
-          '<span>' + escapeHtml(p.city) + ' • ' + escapeHtml(p.neighborhood) + '</span>' +
-          '<span class="dot">•</span>' +
-          '<span>' + escapeHtml(p.timeLabel) + '</span>' +
-        '</div>' +
-        '<div class="meta-row">' +
-          '<span class="price">$' + escapeHtml(p.budgetMin) + '-$' + escapeHtml(p.budgetMax) + '</span>' +
-          '<span class="dot">•</span>' +
-          '<span>' + escapeHtml(p.filledSlots) + '/' + escapeHtml(p.totalSlots) + ' players</span>' +
-        '</div>' +
-        '<div class="fit">' +
-          '<div class="fit-label"><span>Match Fit Score</span><strong>' + fit + '%</strong></div>' +
-          '<div class="fit-bar"><span style="width:' + fit + '%"></span></div>' +
-        '</div>' +
-        '<div class="venue-line">Venue: <strong>' + escapeHtml(p.venueName) + '</strong></div>' +
-        '<div class="chips">' + members + '</div>' +
-        (icebreakers ? '<div class="icebreakers"><div class="icebreakers-label">AI Icebreakers</div><ul>' + icebreakers + '</ul></div>' : '') +
-        '<div class="card-actions">' +
-          '<button class="btn btn-primary" data-action="join-party" data-party-id="' + escapeHtml(p.id) + '"' + (full ? ' disabled' : '') + '>' +
-            (full ? 'Full' : 'Join Party') +
-          '</button>' +
-          '<button class="btn btn-accent" data-action="complete-party" data-party-id="' + escapeHtml(p.id) + '">Complete &amp; Rate Visit</button>' +
-        '</div>' +
-      '</article>';
-  }
+    return `<article class="card party-card" data-party-id="${attr(p.id)}">
+      <div class="card-head">
+        <h3 class="card-title">${escapeHtml(p.title)}</h3>
+        <span class="badge badge-theme">${escapeHtml(p.theme)}</span>
+      </div>
+      <div class="meta-row">
+        <span>${escapeHtml(p.city)} \u2022 ${escapeHtml(p.neighborhood)}</span>
+        <span class="dot">\u2022</span>
+        <span>${escapeHtml(p.timeLabel)}</span>
+      </div>
+      <div class="meta-row">
+        <span class="price">$${escapeHtml(p.budgetMin)}-$${escapeHtml(p.budgetMax)}</span>
+        <span class="dot">\u2022</span>
+        <span>${escapeHtml(p.filledSlots)}/${escapeHtml(p.totalSlots)} players</span>
+        ${distance > 0 ? `<span class="dot">\u2022</span><span>${distance} km away</span>` : ''}
+      </div>
+      <div class="party-flags">${partyFlags(p)}</div>
+      <div class="fit">
+        <div class="fit-label"><span>Match Fit Score</span><strong>${fit}%</strong></div>
+        <div class="fit-bar"><span style="width:${fit}%"></span></div>
+      </div>
+      <div class="venue-line">Venue: <strong>${escapeHtml(p.venueName)}</strong></div>
+      <div class="chips">${members}</div>
+      ${icebreakers ? `<div class="icebreakers"><div class="icebreakers-label">AI Icebreakers</div><ul>${icebreakers}</ul></div>` : ''}
+      <div class="card-actions">
+        ${full
+          ? `<button class="btn btn-accent" data-action="queue-party" data-party-id="${attr(p.id)}">Join Waitlist Queue</button>`
+          : `<button class="btn btn-primary" data-action="join-party" data-party-id="${attr(p.id)}">Join Slot</button>`}
+        ${joined && !checkedIn
+          ? `<button class="btn btn-accent" data-action="checkin-party" data-party-id="${attr(p.id)}">Safety Check-In</button>`
+          : ''}
+        ${p.venueId ? `<button class="btn btn-ghost" data-action="open-venue" data-venue-id="${attr(p.venueId)}">View Live Slots</button>` : ''}
+        <button class="btn btn-ghost" data-action="complete-party" data-party-id="${attr(p.id)}">Complete &amp; Rate</button>
+      </div>
+    </article>`;
+  };
 
-  function renderParties() {
-    var host = el('party-list');
-    var parties = state.results.parties;
-    if (!parties.length) {
-      host.innerHTML = emptyState('No open parties yet', 'Create one with "+ Create Party" and your crew will show up here.');
+  const renderParties = () => {
+    const host = el('party-list');
+    const parties = state.results.parties;
+    host.innerHTML = parties.length
+      ? parties.map(partyCard).join('')
+      : emptyState('No open parties match your filters', 'Loosen the budget window or hit Reset filters to see every crew in town.');
+  };
+
+  /* ---------------- rendering: players (demo crowd) ---------------- */
+
+  const playerCard = (f) => {
+    const added = f.status && f.status !== 'DISCOVER';
+    return `<article class="card player-card" data-friend-id="${attr(f.id)}">
+      <div class="avatar">${escapeHtml(initials(f.name))}</div>
+      <div class="player-body">
+        <div class="player-name">${escapeHtml(f.name)}${f.verified ? '<span class="verified" title="Verified">\u2713</span>' : ''}</div>
+        <div class="player-role">${escapeHtml(f.ageRole)}</div>
+        <div class="player-city">${escapeHtml(f.city)}</div>
+        <div class="chips">${chips(f.themes)}</div>
+      </div>
+      <div class="player-actions">
+        <button class="btn btn-primary btn-sm" data-action="add-friend" data-friend-id="${attr(f.id)}"${added ? ' disabled' : ''}>${added ? 'Added' : 'Add Friend'}</button>
+      </div>
+    </article>`;
+  };
+
+  const renderPlayers = () => {
+    const host = el('player-list');
+    const players = state.results.players || [];
+    host.innerHTML = players.length
+      ? players.map(playerCard).join('')
+      : emptyState('No matching players right now', 'Try another theme or city, or hit Reset to see everyone.');
+  };
+
+  /* ---------------- rendering: friends & live invites ---------------- */
+
+  const relationshipFor = (guestId) => {
+    const friends = acceptedFriendIds();
+    if (friends.has(guestId)) return 'friends';
+    const incoming = (state.presence.pendingFriendRequests || []).find((r) => r.fromGuestId === guestId);
+    if (incoming) return 'incoming';
+    return 'none';
+  };
+
+  const onlineCard = (g) => {
+    const relation = relationshipFor(g.guestId);
+    const incoming = (state.presence.pendingFriendRequests || []).find((r) => r.fromGuestId === g.guestId);
+    return `<article class="card online-card" data-guest-id="${attr(g.guestId)}">
+      <div class="avatar">${escapeHtml(initials(g.displayName))}</div>
+      <div class="online-body">
+        <div class="player-name"><span class="online-dot"></span>${escapeHtml(g.displayName)}</div>
+        <div class="online-role">${escapeHtml(g.ageRole || '')}</div>
+        <div class="online-meta">${escapeHtml(g.neighborhood || '')} \u2022 ${escapeHtml(g.city || '')} \u2022 prefers ${escapeHtml(g.format || 'Solo')} / ${escapeHtml(g.pace || 'Chill')}</div>
+        <div class="chips">${chips(g.verificationBadges)}</div>
+      </div>
+      <div class="online-actions">
+        ${relation === 'friends'
+          ? '<span class="badge badge-verified">In your crew</span>'
+          : relation === 'incoming'
+            ? `<button class="btn btn-primary btn-sm" data-action="accept-friend" data-request-id="${attr(incoming.id)}">Accept</button>`
+            : `<button class="btn btn-primary btn-sm" data-action="request-friend" data-guest-id="${attr(g.guestId)}">Add Friend</button>`}
+        <button class="btn btn-ghost btn-sm" data-action="invite-to-slot" data-guest-id="${attr(g.guestId)}">Invite to My Slot</button>
+      </div>
+    </article>`;
+  };
+
+  const renderOnline = () => {
+    const host = el('online-list');
+    const others = (state.presence.onlineGuests || []).filter((g) => g.guestId !== myId());
+    host.innerHTML = others.length
+      ? others.map(onlineCard).join('')
+      : emptyState('Nobody else is online yet', 'Open a second browser tab with the button up top to bring another live user in.');
+  };
+
+  const requestCard = (relation) => `<article class="card online-card" data-request-id="${attr(relation.id)}">
+    <div class="avatar">${escapeHtml(initials(relation.fromName))}</div>
+    <div class="online-body">
+      <div class="player-name">${escapeHtml(relation.fromName)}</div>
+      <div class="online-role">wants to join your crew</div>
+    </div>
+    <div class="online-actions">
+      <button class="btn btn-primary btn-sm" data-action="accept-friend" data-request-id="${attr(relation.id)}">Accept</button>
+      <button class="btn btn-ghost btn-sm" data-action="decline-friend" data-request-id="${attr(relation.id)}">Decline</button>
+    </div>
+  </article>`;
+
+  const renderFriendRequests = () => {
+    const host = el('friend-requests');
+    const requests = (state.presence.pendingFriendRequests || []).filter((r) => !state.dismissedRequests.has(r.id));
+    host.innerHTML = requests.length
+      ? requests.map(requestCard).join('')
+      : emptyState('No pending requests', 'Friend requests from other live tabs will show up here.');
+  };
+
+  const friendCard = (relation) => {
+    const otherName = relation.fromGuestId === myId() ? relation.toName : relation.fromName;
+    const otherId = relation.fromGuestId === myId() ? relation.toGuestId : relation.fromGuestId;
+    const online = !!findGuestById(otherId);
+    return `<article class="card online-card" data-guest-id="${attr(otherId)}">
+      <div class="avatar">${escapeHtml(initials(otherName))}</div>
+      <div class="online-body">
+        <div class="player-name">${online ? '<span class="online-dot"></span>' : ''}${escapeHtml(otherName)}</div>
+        <div class="online-role">${online ? 'Online now' : 'Offline'}</div>
+      </div>
+      <div class="online-actions">
+        <button class="btn btn-ghost btn-sm" data-action="invite-to-slot" data-guest-id="${attr(otherId)}">Invite to My Slot</button>
+      </div>
+    </article>`;
+  };
+
+  const renderFriends = () => {
+    const host = el('friends-list');
+    const relations = state.presence.acceptedFriends || [];
+    host.innerHTML = relations.length
+      ? relations.map(friendCard).join('')
+      : emptyState('Your crew is empty', 'Send a friend request to anyone online and they will appear here once they accept.');
+  };
+
+  const renderInvitePanel = () => {
+    const host = el('invite-panel');
+    if (!host) return;
+    const slots = mySlots();
+    const relations = state.presence.acceptedFriends || [];
+    if (!slots.length) {
+      host.innerHTML = emptyState('You have no open slots', 'Create a party first, then invite friends straight into a free slot.');
       return;
     }
-    host.innerHTML = parties.map(partyCard).join('');
-  }
-
-  /* ---------------- rendering: players & friends ---------------- */
-
-  function playerCard(f) {
-    var added = !!state.addedIds[f.id];
-    return '' +
-      '<article class="card player-card" data-friend-id="' + escapeHtml(f.id) + '">' +
-        '<div class="avatar">' + escapeHtml(initials(f.name)) + '</div>' +
-        '<div class="player-body">' +
-          '<div class="player-name">' + escapeHtml(f.name) + (f.verified ? '<span class="verified" title="Verified">✓</span>' : '') + '</div>' +
-          '<div class="player-role">' + escapeHtml(f.ageRole) + '</div>' +
-          '<div class="player-city">' + escapeHtml(f.city) + '</div>' +
-          '<div class="chips">' + themeChips(f.themes) + '</div>' +
-        '</div>' +
-        '<div class="player-actions">' +
-          '<button class="btn btn-primary btn-sm" data-action="add-friend" data-friend-id="' + escapeHtml(f.id) + '"' + (added ? ' disabled' : '') + '>' +
-            (added ? 'Added' : 'Add Friend') +
-          '</button>' +
-          '<button class="btn btn-ghost btn-sm" data-action="invite-player" data-friend-id="' + escapeHtml(f.id) + '">Invite</button>' +
-        '</div>' +
-      '</article>';
-  }
-
-  function visiblePlayers() {
-    return state.results.players.filter(function (p) {
-      return p.status === 'DISCOVER' || state.addedIds[p.id];
-    });
-  }
-
-  function renderPlayers() {
-    var host = el('player-list');
-    var players = visiblePlayers();
-    if (!players.length) {
-      host.innerHTML = emptyState('No matching players right now', 'Try another theme or city, or hit Reset to see everyone.');
+    if (!relations.length) {
+      host.innerHTML = emptyState('No friends to invite yet', 'Add an online guest to your crew first.');
       return;
     }
-    host.innerHTML = players.map(playerCard).join('');
-  }
-
-  function friendCard(f) {
-    var added = !!state.addedIds[f.id] || f.status !== 'DISCOVER';
-    var action = f.status === 'DISCOVER'
-      ? '<div class="friend-actions"><button class="btn btn-primary btn-sm" data-action="add-friend" data-friend-id="' + escapeHtml(f.id) + '"' + (added ? ' disabled' : '') + '>' + (added ? 'Added' : 'Add Friend') + '</button></div>'
-      : '';
-    return '' +
-      '<article class="card friend-card" data-friend-id="' + escapeHtml(f.id) + '">' +
-        '<div class="avatar">' + escapeHtml(initials(f.name)) + '</div>' +
-        '<div class="friend-body">' +
-          '<div class="friend-name">' + escapeHtml(f.name) + (f.verified ? '<span class="verified" title="Verified">✓</span>' : '') + '</div>' +
-          '<div class="friend-role">' + escapeHtml(f.ageRole) + '</div>' +
-          '<div class="friend-city">' + escapeHtml(f.city) + ' • ' + escapeHtml(f.status === 'DISCOVER' ? 'Suggested' : 'Saved friend') + '</div>' +
-          '<div class="chips">' + themeChips(f.themes) + '</div>' +
-        '</div>' +
-        action +
-      '</article>';
-  }
-
-  function renderFriends() {
-    var coreHost = el('core-buddy-card');
-    var gridHost = el('friends-list');
-
-    var cores = state.friends.filter(function (f) { return f.status === 'CORE_BUDDY'; });
-    coreHost.innerHTML = cores.map(function (f) {
-      return '<div class="core-label">Your Core Buddy</div>' + friendCard(f);
+    const slotOptions = slots.map((p) =>
+      `<option value="${attr(p.id)}">${escapeHtml(p.title)} (${p.filledSlots}/${p.totalSlots})</option>`).join('');
+    const friendOptions = relations.map((r) => {
+      const name = r.fromGuestId === myId() ? r.toName : r.fromName;
+      const id = r.fromGuestId === myId() ? r.toGuestId : r.fromGuestId;
+      return `<option value="${attr(id)}">${escapeHtml(name)}</option>`;
     }).join('');
+    host.innerHTML = `<div class="invite-row">
+        <div class="field">
+          <label class="field-label" for="invite-slot-select">My open slot</label>
+          <select id="invite-slot-select" class="select">${slotOptions}</select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="invite-friend-select">Invite friend</label>
+          <select id="invite-friend-select" class="select">${friendOptions}</select>
+        </div>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary" data-action="send-invite">Send Invite</button>
+      </div>`;
+  };
 
-    if (!state.friends.length) {
-      gridHost.innerHTML = emptyState('Your crew is empty', 'Add players from Explore & Search to start building your crew.');
+  const renderPresence = () => {
+    renderOnline();
+    renderFriendRequests();
+    renderFriends();
+    renderInvitePanel();
+  };
+
+  /* ---------------- rendering: radar ---------------- */
+
+  const renderRadar = () => {
+    const host = el('radar-strip');
+    if (!host) return;
+    const events = state.radar || [];
+    if (!events.length) {
+      host.innerHTML = emptyState('No free events in this window', 'Try All Cities or widen your budget to catch this weekend\'s free museum days and park meetups.');
       return;
     }
-
-    var rest = state.friends.filter(function (f) { return f.status !== 'CORE_BUDDY'; });
-    gridHost.innerHTML = rest.length
-      ? rest.map(friendCard).join('')
-      : emptyState('No saved friends yet', 'Add a player from Explore & Search and they will appear here.');
-  }
+    host.innerHTML = events.map((event) => {
+      const free = num(event.costPerPerson, 0) === 0;
+      return `<article class="radar-card">
+        <div class="radar-cat">${escapeHtml(event.category)}</div>
+        <div class="radar-title">${escapeHtml(event.title)}</div>
+        <div class="radar-meta">${escapeHtml(event.whenLabel)} \u2022 ${escapeHtml(event.venueName)}</div>
+        <div class="radar-meta">${escapeHtml(event.city)}</div>
+        <div class="radar-cost ${free ? 'free' : 'paid'}">${free ? 'FREE' : `$${escapeHtml(event.costPerPerson)} per person`}</div>
+        <button class="btn btn-accent btn-sm" data-action="radar-start" data-event-id="${attr(event.id)}">Start Party Here</button>
+      </article>`;
+    }).join('');
+  };
 
   /* ---------------- rendering: visit history ---------------- */
 
-  function sortedHistory() {
-    return state.visitHistory.slice().sort(function (a, b) {
-      var ta = Date.parse(a.visitedDate) || 0;
-      var tb = Date.parse(b.visitedDate) || 0;
-      return tb - ta;
-    });
-  }
+  const sortedHistory = () => state.visitHistory.slice().sort((a, b) => {
+    const ta = Date.parse(a.visitedDate) || 0;
+    const tb = Date.parse(b.visitedDate) || 0;
+    return tb - ta;
+  });
 
-  function ratingForm(v) {
-    var draft = state.drafts[v.id] || { rating: 0, tags: [] };
-    var stars = [1, 2, 3, 4, 5].map(function (n) {
-      return '<button type="button" class="star' + (n <= draft.rating ? ' is-selected' : '') + '"' +
-        ' data-action="star-pick" data-value="' + n + '"' +
-        ' role="radio" aria-checked="' + (n === draft.rating) + '"' +
-        ' aria-label="' + n + ' star' + (n === 1 ? '' : 's') + '">★</button>';
+  const ratingForm = (v) => {
+    const draft = state.drafts[v.id] || { rating: 0, tags: [] };
+    const stars = [1, 2, 3, 4, 5].map((n) =>
+      `<button type="button" class="star${n <= draft.rating ? ' is-selected' : ''}" data-action="star-pick" data-value="${n}" role="radio" aria-checked="${n === draft.rating}" aria-label="${n} star${n === 1 ? '' : 's'}">\u2605</button>`
+    ).join('');
+    const tags = VIBE_TAGS.map((t) => {
+      const active = draft.tags.includes(t);
+      return `<button type="button" class="chip chip-btn${active ? ' chip-active' : ''}" data-action="toggle-tag" data-tag="${escapeHtml(t)}" aria-pressed="${active}">${escapeHtml(t)}</button>`;
     }).join('');
 
-    var tags = VIBE_TAGS.map(function (t) {
-      var active = draft.tags.indexOf(t) !== -1;
-      return '<button type="button" class="chip chip-btn' + (active ? ' chip-active' : '') + '"' +
-        ' data-action="toggle-tag" data-tag="' + escapeHtml(t) + '"' +
-        ' aria-pressed="' + active + '">' + escapeHtml(t) + '</button>';
-    }).join('');
+    return `<div class="rating-form" data-visit-id="${attr(v.id)}">
+      <div class="rating-label">Rate this venue</div>
+      <div class="star-row" role="radiogroup" aria-label="Venue rating">${stars}
+        <span class="star-value">${draft.rating ? `${draft.rating} / 5` : 'Not rated'}</span>
+      </div>
+      <div class="tag-row">${tags}</div>
+      <textarea class="textarea" id="comment-${attr(v.id)}" rows="3" placeholder="How was the venue? Any tips for the crew?"></textarea>
+      <div class="card-actions">
+        <button class="btn btn-primary" data-action="submit-rating" data-visit-id="${attr(v.id)}">Submit Venue Rating</button>
+      </div>
+    </div>`;
+  };
 
-    return '' +
-      '<div class="rating-form" data-visit-id="' + escapeHtml(v.id) + '">' +
-        '<div class="rating-label">Rate this venue</div>' +
-        '<div class="star-row" role="radiogroup" aria-label="Venue rating">' + stars +
-          '<span class="star-value">' + (draft.rating ? draft.rating + ' / 5' : 'Not rated') + '</span>' +
-        '</div>' +
-        '<div class="tag-row">' + tags + '</div>' +
-        '<textarea class="textarea" id="comment-' + escapeHtml(v.id) + '" rows="3" placeholder="How was the venue? Any tips for the crew?"></textarea>' +
-        '<div class="card-actions">' +
-          '<button class="btn btn-primary" data-action="submit-rating" data-visit-id="' + escapeHtml(v.id) + '">Submit Venue Rating</button>' +
-        '</div>' +
-      '</div>';
-  }
+  const ratedSummary = (v) => {
+    const tags = (v.selectedTags || []).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join('');
+    return `<div class="rated-summary">
+      <div class="stars-static">${starGlyphs(v.rating || 0)}</div>
+      <div class="rated-meta">Rated ${escapeHtml(v.rating)} out of 5 on ${escapeHtml(v.visitedDate)}</div>
+      ${tags ? `<div class="chips">${tags}</div>` : ''}
+      ${v.reviewComment ? `<p class="rated-comment">"${escapeHtml(v.reviewComment)}"</p>` : ''}
+    </div>`;
+  };
 
-  function ratedSummary(v) {
-    var tags = (v.selectedTags || []).map(function (t) {
-      return '<span class="chip">' + escapeHtml(t) + '</span>';
-    }).join('');
-    return '' +
-      '<div class="rated-summary">' +
-        '<div class="stars-static">' + starGlyphs(v.rating || 0) + '</div>' +
-        '<div class="rated-meta">Rated ' + escapeHtml(v.rating) + ' out of 5 on ' + escapeHtml(v.visitedDate) + '</div>' +
-        (tags ? '<div class="chips">' + tags + '</div>' : '') +
-        (v.reviewComment ? '<p class="rated-comment">"' + escapeHtml(v.reviewComment) + '"</p>' : '') +
-      '</div>';
-  }
+  const historyCard = (v) => {
+    const highlighted = state.highlightVisitId && String(state.highlightVisitId) === String(v.id);
+    const attendees = (v.attendees || []).map((name) => `<span class="attendee">${escapeHtml(name)}</span>`).join('');
+    return `<article class="card history-card${highlighted ? ' highlight' : ''}" id="history-card-${attr(v.id)}">
+      <div class="card-head">
+        <h3 class="card-title">${escapeHtml(v.partyTitle)}</h3>
+        <span class="badge badge-theme">${escapeHtml(v.theme)}</span>
+      </div>
+      <div class="meta-row">
+        <span>Venue: <strong>${escapeHtml(v.venueName)}</strong></span>
+        <span class="dot">\u2022</span>
+        <span>${escapeHtml(v.visitedDate)}</span>
+      </div>
+      <div class="attendees">${attendees}</div>
+      ${v.rating ? ratedSummary(v) : ratingForm(v)}
+    </article>`;
+  };
 
-  function attendeeChips(v) {
-    return (v.attendees || []).map(function (name) {
-      var friend = friendByName(name);
-      var canAdd = friend && friend.status === 'DISCOVER' && !state.addedIds[friend.id];
-      return '<span class="attendee">' + escapeHtml(name) +
-        (canAdd ? '<button class="chip-add" data-action="add-friend" data-friend-id="' + escapeHtml(friend.id) + '">+ Add to Friends</button>' : '') +
-        '</span>';
-    }).join('');
-  }
-
-  function historyCard(v) {
-    var highlighted = state.highlightVisitId && String(state.highlightVisitId) === String(v.id);
-    return '' +
-      '<article class="card history-card' + (highlighted ? ' highlight' : '') + '" id="history-card-' + escapeHtml(v.id) + '">' +
-        '<div class="card-head">' +
-          '<h3 class="card-title">' + escapeHtml(v.partyTitle) + '</h3>' +
-          '<span class="badge badge-theme">' + escapeHtml(v.theme) + '</span>' +
-        '</div>' +
-        '<div class="meta-row">' +
-          '<span>Venue: <strong>' + escapeHtml(v.venueName) + '</strong></span>' +
-          '<span class="dot">•</span>' +
-          '<span>' + escapeHtml(v.visitedDate) + '</span>' +
-        '</div>' +
-        '<div class="attendees">' + attendeeChips(v) + '</div>' +
-        (v.rating ? ratedSummary(v) : ratingForm(v)) +
-      '</article>';
-  }
-
-  function nextUpHtml() {
-    var visits = sortedHistory();
-    var seen = {};
-    var liked = {};
-    visits.forEach(function (v) {
-      seen[v.venueId] = true;
-      if (v.rating >= 4) liked[v.theme] = (liked[v.theme] || 0) + 1;
-    });
-    var fav = Object.keys(liked).sort(function (x, y) { return liked[y] - liked[x]; })[0];
-    var pool = state.venues.filter(function (v) { return !seen[v.id]; });
-    if (!pool.length) pool = state.venues.slice();
-    pool.sort(function (x, y) { return num(y.avgRating, 0) - num(x.avgRating, 0); });
-    var pick = pool[0];
-    if (!pick) return '';
-    var mate = state.friends.filter(function (f) {
-      return f.status === 'FRIEND' && (!fav || (f.themes || []).indexOf(fav) !== -1);
-    })[0];
-    var why = fav ? 'You rated ' + fav + ' nights 4+ stars.' : 'Top-rated spot you have not visited yet.';
-    return '<article class="card next-up"><h3>Next up: ' + escapeHtml(pick.name) + '</h3>' +
-      '<p>' + escapeHtml(pick.city) + ' &middot; &#9733; ' + num(pick.avgRating, 0).toFixed(1) + '. ' + escapeHtml(why) +
-      (mate ? ' Invite ' + escapeHtml(mate.name) + ' from your crew.' : '') + '</p>' +
-      '<button class="btn btn-primary" data-action="switch-tab" data-tab="explore">Plan this hangout</button></article>';
-  }
-
-  function renderHistory() {
-    var host = el('history-list');
-    var visits = sortedHistory();
-    if (!visits.length) {
-
-      host.innerHTML = nextUpHtml() + emptyState('No visits logged yet', 'Finish a party with "Complete & Rate Visit" and it will land here for a rating.');
-      return;
-    }
-    host.innerHTML = nextUpHtml() + visits.map(historyCard).join('');
-  }
+  const renderHistory = () => {
+    const host = el('history-list');
+    const visits = sortedHistory();
+    host.innerHTML = visits.length
+      ? visits.map(historyCard).join('')
+      : emptyState('No visits logged yet', 'Finish a party with "Complete & Rate" and it will land here for a rating.');
+  };
 
   /* ---------------- rendering: venues ---------------- */
 
-  function venueCard(v) {
-    var rating = typeof v.avgRating === 'number' ? v.avgRating.toFixed(1) : '—';
-    var count = num(v.ratingCount, 0);
-    return '' +
-      '<article class="card venue-card" data-venue-id="' + escapeHtml(v.id) + '">' +
-        '<div class="card-head">' +
-          '<h3 class="card-title">' + escapeHtml(v.name) + '</h3>' +
-          '<span class="badge badge-city">' + escapeHtml(v.city) + '</span>' +
-        '</div>' +
-        '<div class="venue-cat">' + escapeHtml(v.category) + ' • ' + escapeHtml(v.neighborhood) + '</div>' +
-        '<div class="meta-row">' +
-          '<span class="rating-live">' + rating + ' ★ (' + count + ' rating' + (count === 1 ? '' : 's') + ')</span>' +
-          '<span class="dot">•</span>' +
-          '<span class="price">$' + escapeHtml(v.avgCostUsd) + '</span>' +
-        '</div>' +
-        '<div class="chips">' + themeChips(v.tags) + '</div>' +
-        '<div class="theme-hint">' + escapeHtml(themeHint(v)) + '</div>' +
-      '</article>';
-  }
+  const venueCard = (v) => {
+    const rating = typeof v.avgRating === 'number' ? v.avgRating.toFixed(1) : '\u2014';
+    const ratingCount = num(v.ratingCount, 0);
+    const slots = num(v.activeSlotCount, 0);
+    return `<article class="card venue-card" data-venue-id="${attr(v.id)}">
+      <div class="card-head">
+        <h3 class="card-title">${escapeHtml(v.name)}</h3>
+        <span class="badge badge-city">${escapeHtml(v.city)}</span>
+      </div>
+      <div class="venue-cat">${escapeHtml(v.category)} \u2022 ${escapeHtml(v.neighborhood)}</div>
+      <div class="meta-row">
+        <span class="rating-live">${rating} \u2605 (${ratingCount} rating${ratingCount === 1 ? '' : 's'})</span>
+        <span class="dot">\u2022</span>
+        <span class="price">$${escapeHtml(v.avgCostUsd)} pp</span>
+        <span class="dot">\u2022</span>
+        <span>${slots} active slot${slots === 1 ? '' : 's'}</span>
+        ${num(v.queueCount, 0) > 0 ? `<span class="dot">\u2022</span><span>${escapeHtml(v.queueCount)} in queue</span>` : ''}
+      </div>
+      <div class="venue-badges">
+        ${v.publicSafeSpot ? '<span class="badge badge-safe">Public Safe Spot</span>' : ''}
+        ${v.featuredPartner ? '<span class="badge badge-featured">Featured Partner</span>' : ''}
+        ${v.demoPool ? '<span class="badge badge-demo">Demo Pool</span>' : ''}
+      </div>
+      <div class="chips">${chips(v.tags)}</div>
+      <div class="card-actions">
+        <button class="btn btn-primary btn-sm" data-action="open-venue" data-venue-id="${attr(v.id)}">View Live Slots</button>
+      </div>
+    </article>`;
+  };
 
-  function themeHint(v) {
-    var hits = [];
-    (v.tags || []).forEach(function (t) {
-      var theme = THEME_HINTS[t];
-      if (theme && hits.indexOf(theme) === -1) hits.push(theme);
-    });
-    if (!hits.length) return 'Best for: ' + (v.category || 'Casual hangs');
-    return 'Best for: ' + hits.join(', ');
-  }
-
-  function renderVenueMini() {
-    var host = el('venue-mini-list');
-    var venues = state.results.venues;
-    if (!venues.length) {
-      host.innerHTML = emptyState('No venues found', 'Change the theme or budget filter and search again.');
-      return;
-    }
-    host.innerHTML = venues.map(venueCard).join('');
-  }
-
-  function sortedVenues() {
-    var list = state.results.venues.filter(function (v) {
-      return state.venueCity === 'All Cities' || v.city === state.venueCity;
-    });
-    list.sort(function (a, b) {
-      if (state.venueSort === 'price') {
-        return (a.avgCostUsd - b.avgCostUsd) || (b.avgRating - a.avgRating);
-      }
+  const sortedVenues = () => {
+    const list = (state.results.venues.length ? state.results.venues : state.venues)
+      .filter((v) => state.venueCity === 'All Cities' || v.city === state.venueCity);
+    list.sort((a, b) => {
+      if (state.venueSort === 'price') return (a.avgCostUsd - b.avgCostUsd) || (b.avgRating - a.avgRating);
+      if (state.venueSort === 'slots') return (num(b.activeSlotCount, 0) - num(a.activeSlotCount, 0)) || (b.avgRating - a.avgRating);
+      if (state.venueSort === 'name') return String(a.name).localeCompare(String(b.name));
       return (b.avgRating - a.avgRating) || (a.avgCostUsd - b.avgCostUsd);
     });
     return list;
-  }
+  };
 
-  function renderVenues() {
-    var host = el('venue-list');
-    var venues = sortedVenues();
-    if (!venues.length) {
-      host.innerHTML = emptyState('No venues in this city', 'Pick another city or reset the filter to see every spot.');
-      return;
-    }
-    host.innerHTML = venues.map(venueCard).join('');
-  }
+  const renderVenues = () => {
+    const host = el('venue-list');
+    const venues = sortedVenues();
+    host.innerHTML = venues.length
+      ? venues.map(venueCard).join('')
+      : emptyState('No venues in this city', 'Pick another city or run a search to see every spot.');
+  };
 
-  /* ---------------- rendering: all ---------------- */
+  const renderVenueMini = () => {
+    const host = el('venue-mini-list');
+    const venues = state.results.venues;
+    host.innerHTML = venues.length
+      ? venues.map(venueCard).join('')
+      : emptyState('No venues found', 'Change the theme or budget filter and search again.');
+  };
 
-  function renderAll() {
+  /* ---------------- rendering: profile ---------------- */
+
+  const renderProfile = () => {
+    const s = state.identity;
+    if (!s) return;
+    const parts = String(s.ageRole || '').split('\u2022');
+    el('profile-name').value = s.displayName || '';
+    el('profile-age').value = (parts[0] || '').trim().replace(/[^0-9]/g, '');
+    el('profile-role').value = parts.length > 1 ? parts.slice(1).join('\u2022').trim() : '';
+    ensureCityOption('profile-city', s.city);
+    el('profile-city').value = s.city || CITIES[0];
+    el('profile-neighborhood').value = s.neighborhood || '';
+    el('profile-format').value = s.format || 'Solo';
+    el('profile-pace').value = s.pace || 'Chill';
+    el('profile-budget-min').value = s.budgetMin ?? 0;
+    el('profile-budget-max').value = s.budgetMax ?? 40;
+    const badges = s.verificationBadges || [];
+    el('profile-id').checked = badges.includes('ID Verified');
+    el('profile-linkedin').checked = badges.some((b) => /linkedin/i.test(b));
+    el('profile-public').checked = !!s.publicVenuesOnly;
+    el('profile-minigroup').checked = !!s.miniGroupPriority;
+  };
+
+  /* ---------------- rendering: orchestrator ---------------- */
+
+  const renderAll = () => {
     updateFilterUi();
     renderParties();
     renderPlayers();
     renderVenueMini();
-    renderFriends();
-    renderHistory();
     renderVenues();
+    renderHistory();
+    renderRadar();
+    renderPresence();
     applyProState();
-    if (window.CrewMap) window.CrewMap.renderVenues(state.results.venues);
-  }
+    if (window.CrewMap) window.CrewMap.renderVenues(state.results.venues.length ? state.results.venues : state.venues);
+  };
 
-  function applyProState() {
-    var btn = el('upgrade-btn');
+  const applyProState = () => {
+    const btn = el('upgrade-btn');
     if (!btn) return;
     if (state.pro) {
       btn.classList.add('is-pro');
@@ -545,568 +812,730 @@
       btn.textContent = 'Upgrade ($9.99/mo)';
       btn.removeAttribute('aria-label');
     }
-  }
+  };
 
   /* ---------------- tabs ---------------- */
 
-  function switchTab(tab) {
-    if (TABS.indexOf(tab) === -1) return;
+  const switchTab = (tab) => {
+    if (!TABS.includes(tab)) return;
     state.tab = tab;
-    TABS.forEach(function (name) {
-      var view = el('view-' + name);
+    TABS.forEach((name) => {
+      const view = el(`view-${name}`);
       if (view) view.classList.toggle('active', name === tab);
     });
-    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (btn) {
-      btn.classList.toggle('active', btn.dataset.tab === tab);
-    });
-    if (tab === 'explore' && window.CrewMap) {
-      window.requestAnimationFrame(function () { window.CrewMap.init('venue-map'); });
-    }
-    if (tab === 'history' && state.highlightVisitId) {
-      focusVisit(state.highlightVisitId);
-    }
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
+    document.querySelectorAll('.tab').forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === tab));
 
-  function focusVisit(visitId) {
+    if (tab === 'explore' && window.CrewMap) {
+      window.requestAnimationFrame(() => window.CrewMap.init('venue-map'));
+    }
+    if (tab === 'profile') renderProfile();
+    if (tab === 'friends') renderPresence();
+    if (tab === 'history' && state.highlightVisitId) focusVisit(state.highlightVisitId);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const focusVisit = (visitId) => {
     if (!visitId) return;
-    window.setTimeout(function () {
-      var card = el('history-card-' + visitId);
+    window.setTimeout(() => {
+      const card = el(`history-card-${visitId}`);
       if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }, 80);
-  }
+  };
 
   /* ---------------- filters & search ---------------- */
 
-  function readFilters() {
+  const setActivePill = (group, node) => {
+    if (!group) return;
+    group.querySelectorAll('.pill').forEach((p) => p.classList.toggle('active', p === node));
+  };
+
+  const syncBudget = () => {
+    let min = clamp(num(val('budget-min'), 0), 0, 100);
+    let max = clamp(num(val('budget-max'), 100), 0, 100);
+    if (min > max) { const swap = min; min = max; max = swap; el('budget-min').value = min; el('budget-max').value = max; }
+    const fill = el('budget-fill');
+    if (fill) { fill.style.left = `${min}%`; fill.style.width = `${max - min}%`; }
+    el('budget-readout').textContent = `$${min} \u2013 $${max} per person`;
+    state.filters.budgetMin = min;
+    state.filters.budgetMax = max;
+  };
+
+  const readFilters = () => {
     state.filters.city = val('global-city') || 'All Cities';
     state.filters.theme = val('filter-theme') || '';
-    state.filters.maxBudget = num(val('filter-budget'), 0);
-  }
+    state.filters.timeWindow = val('filter-time') || '';
+    state.filters.friendsOnly = el('friends-only').checked;
+    state.filters.publicSafeOnly = el('public-safe').checked;
+    state.filters.verifiedOnly = el('verified-only').checked;
+    state.filters.miniGroupOnly = el('mini-group-only').checked;
+    syncBudget();
+  };
 
-  function doSearch(quiet) {
+  /* ---------------- filters drawer, chips, summary ---------------- */
+
+  const openFilters = () => {
+    el('filter-sidebar').classList.add('open');
+    el('filter-sidebar').setAttribute('aria-hidden', 'false');
+    el('filters-scrim').hidden = false;
+    el('filters-toggle').setAttribute('aria-expanded', 'true');
+    const first = el('filter-theme');
+    if (first) window.setTimeout(() => first.focus(), 260);
+  };
+
+  const closeFilters = () => {
+    const bar = el('filter-sidebar');
+    if (!bar || !bar.classList.contains('open')) return;
+    bar.classList.remove('open');
+    bar.setAttribute('aria-hidden', 'true');
+    el('filters-scrim').hidden = true;
+    el('filters-toggle').setAttribute('aria-expanded', 'false');
+    el('filters-toggle').focus();
+  };
+
+  const toggleFilters = () => {
+    if (el('filter-sidebar').classList.contains('open')) closeFilters();
+    else openFilters();
+  };
+
+  const updateFilterUi = () => {
+    const f = state.filters;
+    const active = [
+      f.city && f.city !== 'All Cities',
+      !!f.theme,
+      !!f.timeWindow,
+      f.budgetMin > 0 || f.budgetMax < 100,
+      f.format && f.format !== 'All',
+      f.pace && f.pace !== 'All',
+      f.friendsOnly, f.publicSafeOnly, f.verifiedOnly, f.miniGroupOnly
+    ].filter(Boolean).length;
+
+    const badge = el('filters-count');
+    if (badge) { badge.textContent = active; badge.hidden = active === 0; }
+    const clear = el('filters-clear');
+    if (clear) clear.hidden = active === 0;
+    document.querySelectorAll('.qchip').forEach((chip) => {
+      chip.classList.toggle('active', (chip.dataset.theme || '') === (f.theme || ''));
+    });
+
+    const sum = el('results-summary');
+    if (sum) {
+      const p = state.results.parties.length;
+      const pl = state.results.players.length;
+      const bits = [];
+      if (f.city && f.city !== 'All Cities') bits.push(f.city);
+      if (f.theme) bits.push(f.theme);
+      if (f.timeWindow) bits.push(f.timeWindow);
+      if (f.budgetMin > 0 || f.budgetMax < 100) bits.push(`$${f.budgetMin}\u2013$${f.budgetMax}`);
+      sum.textContent = `${p} ${p === 1 ? 'open party' : 'open parties'} \u00b7 ${pl} ${pl === 1 ? 'person' : 'people'}` +
+        (bits.length ? ` \u00b7 ${bits.join(', ')}` : '');
+    }
+  };
+
+  const doSearch = async (options) => {
+    const opts = options || {};
     readFilters();
     updateFilterUi();
-    el('party-list').innerHTML = loading('Searching parties…');
-    el('player-list').innerHTML = loading('Searching players…');
-    el('venue-mini-list').innerHTML = loading('Searching venues…');
-    return window.CrewApi.search(state.filters).then(function (res) {
+    if (!opts.silent) {
+      el('party-list').innerHTML = loading('Searching parties\u2026');
+      el('player-list').innerHTML = loading('Searching players\u2026');
+      el('venue-mini-list').innerHTML = loading('Searching venues\u2026');
+    }
+    try {
+      const res = await window.CrewApi.search({ ...state.filters, guestId: myId() });
       state.results = {
         parties: res.parties || [],
         players: res.players || [],
         venues: res.venues || []
       };
       renderAll();
-      if (quiet !== true) showToast('Found ' + state.results.parties.length + ' open ' +
-        (state.results.parties.length === 1 ? 'party' : 'parties') + ' and ' +
-        count(state.results.venues.length, 'venue') + ' in ' + state.filters.city + '.', 'success');
-    }).catch(function (err) {
+      if (!opts.silent) {
+        showToast(`Found ${count(state.results.parties.length, 'open party').replace('party s', 'parties')} and ${count(state.results.venues.length, 'venue')} in ${state.filters.city}.`, 'success');
+      }
+    } catch (err) {
       renderAll();
       showToast('Search failed: ' + err.message, 'error');
-    });
-  }
-
-  function toggleFilters() {
-    var bar = el('filter-bar');
-    var btn = el('filters-toggle');
-    if (!bar) return;
-    var open = bar.hidden;
-    bar.hidden = !open;
-    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    if (open && el('filter-theme')) el('filter-theme').focus();
-  }
-
-  function updateFilterUi() {
-    readFilters();
-    var f = state.filters;
-    var active = (f.city !== 'All Cities' ? 1 : 0) + (f.theme ? 1 : 0) + (f.maxBudget > 0 ? 1 : 0);
-    var badge = el('filters-count');
-    if (badge) { badge.textContent = active; badge.hidden = active === 0; }
-    var clear = el('filters-clear');
-    if (clear) clear.hidden = active === 0;
-    Array.prototype.forEach.call(document.querySelectorAll('.qchip'), function (chip) {
-      chip.classList.toggle('active', (chip.dataset.theme || '') === f.theme);
-    });
-    var sum = el('results-summary');
-    if (sum) {
-      var p = state.results.parties.length, pl = state.results.players.length;
-      var bits = [];
-      if (f.city !== 'All Cities') bits.push(f.city);
-      if (f.theme) bits.push(f.theme);
-      if (f.maxBudget > 0) bits.push('up to $' + f.maxBudget);
-      sum.textContent = p + (p === 1 ? ' open party' : ' open parties') + ' \u00b7 ' + pl + (pl === 1 ? ' player' : ' players') +
-        (bits.length ? ' \u00b7 ' + bits.join(', ') : '');
     }
-  }
+  };
 
-  /* ---------------- live identity (per tab) & notifications ---------------- */
-
-  var GUEST_KEY = 'crewparty.guestId';
-  var presenceTimer = null;
-
-  function renderIdentity(guest) {
-    el('identity-avatar').textContent = initials(guest.displayName);
-    el('identity-name').textContent = guest.displayName || 'Guest';
-    el('identity-sub').textContent = [guest.ageRole, guest.city].filter(Boolean).join(' \u00b7 ');
-  }
-
-  function initIdentity() {
-    var saved = null;
-    try { saved = window.sessionStorage.getItem(GUEST_KEY); } catch (e) { saved = null; }
-    window.CrewApi.sessionInit(saved, null).then(function (guest) {
-      state.guest = guest;
-      try { window.sessionStorage.setItem(GUEST_KEY, guest.guestId); } catch (e) { /* storage may be unavailable */ }
-      renderIdentity(guest);
-      pollPresence();
-      presenceTimer = window.setInterval(pollPresence, 5000);
-    }).catch(function () {
-      el('identity-name').textContent = 'Offline';
-      el('identity-sub').textContent = 'Backend not reachable';
-    });
-  }
-
-  function pollPresence() {
-    if (!state.guest) return;
-    window.CrewApi.presence(state.guest.guestId).then(renderNotifications).catch(function () { /* next tick retries */ });
-  }
-
-  function renderNotifications(p) {
-    var me = state.guest.guestId;
-    var items = [];
-    (p.pendingFriendRequests || []).forEach(function (r) {
-      if (r.toGuestId === me) items.push({ title: r.fromName + ' wants to join your crew', sub: 'Friend request' });
-    });
-    (p.pendingSlotInvites || []).forEach(function (i) {
-      if (i.toGuestId === me) items.push({ title: i.fromName + ' invited you to ' + (i.partyTitle || 'a party'), sub: i.venueName || 'Party invite' });
-    });
-    (p.acceptedFriends || []).forEach(function (r) {
-      var other = r.fromGuestId === me ? r.toName : r.fromName;
-      items.push({ title: other + ' is in your crew', sub: 'Accepted' });
-    });
-    var count = items.filter(function (i) { return i.sub !== 'Accepted'; }).length;
-    var badge = el('notif-count');
-    badge.textContent = count;
-    badge.hidden = count === 0;
-    var online = (p.onlineGuests || []).length;
-    el('notif-list').innerHTML = (items.length ? items.map(function (i) {
-      return '<div class="notif-item">' + escapeHtml(i.title) + '<small>' + escapeHtml(i.sub) + '</small></div>';
-    }).join('') : '<div class="notif-empty">No new notifications.</div>') +
-      '<div class="notif-empty">' + online + (online === 1 ? ' person' : ' people') + ' online now</div>';
-  }
-
-  function toggleNotif() {
-    var panel = el('notif-panel');
-    var open = panel.hidden;
-    panel.hidden = !open;
-    el('notif-bell').setAttribute('aria-expanded', open ? 'true' : 'false');
-  }
-
-  /* ---------------- Detect My City (browser GPS -> /api/gps/seed) ---------------- */
-
-  function ensureCityOption(selectId, city) {
-    var sel = el(selectId);
-    if (!sel) return;
-    for (var i = 0; i < sel.options.length; i++) if (sel.options[i].value === city) return;
-    var opt = document.createElement('option');
-    opt.value = city;
-    opt.textContent = city;
-    sel.appendChild(opt);
-  }
-
-  function reverseCityName(lat, lng) {
-    var url = 'https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=10&addressdetails=1&accept-language=en&lat=' + lat + '&lon=' + lng;
-    return fetch(url).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
-      var a = d && d.address;
-      if (!a) return '';
-      return a.city || a.town || a.village || a.municipality || a.county || a.state || '';
-    }).catch(function () { return ''; });
-  }
-
-  function detectCity() {
-    var btn = el('detect-city-btn');
-    if (!navigator.geolocation) {
-      showToast('Your browser does not support location detection. Pick a city manually.', 'error');
-      return;
-    }
-    if (btn.disabled) return;
-    btn.disabled = true;
-    btn.textContent = 'Detecting\u2026';
-    var done = function () { btn.disabled = false; btn.innerHTML = '&#128205; Detect My City'; };
-
-    navigator.geolocation.getCurrentPosition(function (pos) {
-      var lat = pos.coords.latitude, lng = pos.coords.longitude;
-      reverseCityName(lat, lng).then(function (name) {
-        return window.CrewApi.gpsSeed(lat, lng, name);
-      }).then(function (res) {
-        var city = res.city || 'Your Area';
-        if (CITIES.indexOf(city) === -1) CITIES.push(city);
-        ensureCityOption('global-city', city);
-        ensureCityOption('venue-city-filter', city);
-        el('global-city').value = city;
-        return reloadData().then(function () {
-          return doSearch(true);
-        }).then(function () {
-          if (window.CrewMap) window.CrewMap.centerOn(res.centerLat, res.centerLng, 13);
-          showToast(res.venuesCreated
-            ? 'Found you in ' + city + ' \u2014 added ' + res.venuesCreated + ' demo spots nearby.'
-            : 'Welcome back to ' + city + '.', 'success');
-        });
-      }).catch(function (err) {
-        showToast('Could not set up your city: ' + err.message, 'error');
-      }).then(done);
-    }, function (err) {
-      var msg = err && err.code === 1
-        ? 'Location access was blocked. Allow it in your browser settings or pick a city manually.'
-        : 'Could not get your location. Pick a city manually.';
-      showToast(msg, 'error');
-      done();
-    }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
-  }
-
-  function resetFilters() {
+  const resetFilters = () => {
     el('global-city').value = 'All Cities';
     el('filter-theme').value = '';
-    el('filter-budget').value = '0';
-    showToast('Filters cleared.', 'info');
-    return doSearch(true);
-  }
+    el('filter-time').value = '';
+    el('budget-min').value = 0;
+    el('budget-max').value = 100;
+    el('friends-only').checked = false;
+    el('public-safe').checked = false;
+    el('verified-only').checked = false;
+    el('mini-group-only').checked = false;
+    state.filters.format = 'All';
+    state.filters.pace = 'All';
+    setActivePill(el('format-pills'), el('format-pills').querySelector('[data-format="All"]'));
+    setActivePill(el('pace-pills'), el('pace-pills').querySelector('[data-pace="All"]'));
+    syncBudget();
+    loadRadar();
+    showToast('Filters reset to All Cities, All Themes, no applied budget window.', 'info');
+    doSearch();
+  };
+
+  /* ---------------- venue drawer ---------------- */
+
+  const slotCard = (p) => {
+    const full = p.filledSlots >= p.totalSlots;
+    const distance = num(p.distanceKm, 0);
+    const queue = (p.queueGuestNames || []).length;
+    return `<div class="slot-card">
+      <div class="slot-head">
+        <div>
+          <div class="slot-title">${escapeHtml(p.title)}</div>
+          <div class="meta-row">${escapeHtml(p.theme)} \u2022 ${escapeHtml(p.timeLabel)}</div>
+        </div>
+        <span class="badge ${full ? 'badge-queue' : 'badge-slot'}">${full ? 'Full' : `${p.totalSlots - p.filledSlots} open`}</span>
+      </div>
+      <div class="slot-meta">
+        <span>$${escapeHtml(p.budgetMin)}-$${escapeHtml(p.budgetMax)} pp</span>
+        <span>${escapeHtml(p.filledSlots)}/${escapeHtml(p.totalSlots)} players</span>
+        ${distance > 0 ? `<span>${distance} km away</span>` : ''}
+        ${queue > 0 ? `<span>${queue} in queue</span>` : ''}
+      </div>
+      <div class="party-flags">
+        ${(p.trustBadges || []).map((b) => `<span class="badge badge-trust">${escapeHtml(b)}</span>`).join('')}
+        ${p.miniGroupPriority ? '<span class="badge badge-trust">Mini-group</span>' : ''}
+        ${p.midpointMode ? '<span class="badge badge-midpoint">Fair-Midpoint</span>' : ''}
+      </div>
+      <div class="slot-actions">
+        ${full
+          ? `<button class="btn btn-accent btn-sm" data-action="queue-party" data-party-id="${attr(p.id)}">Join Waitlist Queue</button>`
+          : `<button class="btn btn-primary btn-sm" data-action="join-party" data-party-id="${attr(p.id)}">Join Slot</button>`}
+        <button class="btn btn-ghost btn-sm" data-action="complete-party" data-party-id="${attr(p.id)}">Complete &amp; Rate</button>
+      </div>
+    </div>`;
+  };
+
+  const openVenueDrawer = async (venueId) => {
+    openDrawer();
+    el('drawer-title').textContent = 'Venue';
+    el('drawer-sub').textContent = '';
+    el('drawer-body').innerHTML = loading('Loading live slots\u2026');
+    try {
+      const res = await window.CrewApi.venueSlots(venueId);
+      renderVenueDrawer(res);
+    } catch (err) {
+      el('drawer-body').innerHTML = emptyState('Could not load this venue', err.message);
+    }
+  };
+
+  const renderVenueDrawer = (res) => {
+    const v = res.venue || {};
+    const rating = typeof v.avgRating === 'number' ? v.avgRating.toFixed(1) : '\u2014';
+    el('drawer-title').textContent = v.name || 'Venue';
+    el('drawer-sub').innerHTML = `${escapeHtml(v.category || '')} \u2022 ${escapeHtml(v.neighborhood || '')}, ${escapeHtml(v.city || '')} \u2022 ${rating} \u2605 \u2022 $${escapeHtml(v.avgCostUsd)} pp \u2022 ${escapeHtml(res.activeSlotCount)} active slot(s) \u2022 ${escapeHtml(res.queueCount)} in queue`;
+    const flags = `<div class="venue-badges">
+      ${v.publicSafeSpot ? '<span class="badge badge-safe">Public Safe Spot</span>' : ''}
+      ${v.featuredPartner ? '<span class="badge badge-featured">Featured Partner</span>' : ''}
+      ${v.demoPool ? '<span class="badge badge-demo">Demo Pool</span>' : ''}
+    </div>`;
+    const slots = res.slots || [];
+    el('drawer-body').innerHTML = flags + (slots.length
+      ? slots.map(slotCard).join('')
+      : emptyState('No open slots at this venue yet', 'Be the first to start a party here and your crew will see it instantly.'));
+  };
 
   /* ---------------- create party ---------------- */
 
-  function venueOptionsHtml(city) {
-    var venues = venuesForCity(city);
-    if (!venues.length) return '<option value="">No venues available</option>';
-    return venues.map(function (v) {
-      return '<option value="' + escapeHtml(v.id) + '">' + escapeHtml(v.name) + ' — ' + escapeHtml(v.neighborhood) + ' ($' + escapeHtml(v.avgCostUsd) + ')</option>';
-    }).join('');
-  }
+  const venueOptionsHtml = (city) => {
+    const venues = city && city !== 'All Cities' ? state.venues.filter((v) => v.city === city) : state.venues;
+    const list = venues.length ? venues : state.venues;
+    if (!list.length) return '<option value="">No venues available</option>';
+    return list.map((v) =>
+      `<option value="${attr(v.id)}">${escapeHtml(v.name)} \u2014 ${escapeHtml(v.neighborhood)} ($${escapeHtml(v.avgCostUsd)})</option>`).join('');
+  };
 
-  function fillVenueSelect(city) {
-    el('create-venue').innerHTML = venueOptionsHtml(city);
-  }
+  const fillVenueSelect = (city) => { el('create-venue').innerHTML = venueOptionsHtml(city); };
 
-  function buddyOptionsHtml(checkedIds) {
-    var ids = checkedIds || [];
-    var buddies = state.friends.filter(function (f) {
-      return f.status === 'CORE_BUDDY' || f.status === 'FRIEND';
+  const buddyOptionsHtml = (checkedIds) => {
+    const ids = checkedIds || [];
+    const buddies = state.friends.filter((f) => f.status === 'CORE_BUDDY' || f.status === 'FRIEND');
+    if (!buddies.length) return '<p class="hint">No saved buddies yet. Add players from Explore &amp; Map first.</p>';
+    return buddies.map((f) =>
+      `<label class="check-row"><input type="checkbox" data-buddy value="${attr(f.id)}"${ids.includes(f.id) ? ' checked' : ''} /><span>${escapeHtml(f.name)} <em>${escapeHtml(f.ageRole || '')}</em></span></label>`).join('');
+  };
+
+  const applyCityOptions = () => {
+    ['create-city', 'venue-city-filter'].forEach((id) => {
+      const select = el(id);
+      if (!select) return;
+      const current = select.value;
+      const extras = [...CITIES];
+      if (state.identity && state.identity.city && !extras.includes(state.identity.city)) extras.push(state.identity.city);
+      select.innerHTML = (id === 'venue-city-filter' ? ['All Cities', ...extras] : extras)
+        .map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+      if ([...select.options].some((o) => o.value === current)) select.value = current;
     });
-    if (!buddies.length) return '<p class="hint">No saved buddies yet. Add players from Explore &amp; Search first.</p>';
-    return buddies.map(function (f) {
-      var checked = ids.indexOf(f.id) !== -1 ? ' checked' : '';
-      return '<label class="check-row"><input type="checkbox" data-buddy value="' + escapeHtml(f.id) + '"' + checked + ' />' +
-        '<span>' + escapeHtml(f.name) + ' <em>' + escapeHtml(f.ageRole || '') + '</em></span></label>';
-    }).join('');
-  }
+  };
 
-  function openCreateModal(options) {
-    var opts = options || {};
-    var citySelect = el('create-city');
-    var themeSelect = el('create-theme');
+  const openCreateModal = (options) => {
+    const opts = options || {};
+    el('create-theme').innerHTML = THEMES.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+    applyCityOptions();
 
-    themeSelect.innerHTML = THEMES.map(function (t) {
-      return '<option value="' + escapeHtml(t) + '">' + escapeHtml(t) + '</option>';
-    }).join('');
-    citySelect.innerHTML = CITIES.map(function (c) {
-      return '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>';
-    }).join('');
-
-    var city = opts.city || (state.filters.city !== 'All Cities' ? state.filters.city : (CITIES.indexOf('Chicago') !== -1 ? 'Chicago' : CITIES[0]));
-    citySelect.value = city;
-
-    var chosenVenues = venuesForCity(city);
-    var venueId = opts.venueId || (chosenVenues[0] ? chosenVenues[0].id : '');
+    const city = opts.city || (state.filters.city !== 'All Cities' ? state.filters.city : CITIES[0]);
+    el('create-city').value = city;
     fillVenueSelect(city);
-    el('create-venue').value = venueId;
 
-    var venue = state.venues.filter(function (v) { return String(v.id) === String(venueId); })[0];
+    const venueId = opts.venueId || (el('create-venue').options[0] ? el('create-venue').options[0].value : '');
+    el('create-venue').value = venueId;
+    const venue = findVenue(venueId);
 
     el('create-title').value = opts.title || '';
-    themeSelect.value = opts.theme && THEMES.indexOf(opts.theme) !== -1 ? opts.theme : THEMES[0];
+    el('create-theme').value = opts.theme && THEMES.includes(opts.theme) ? opts.theme : THEMES[0];
     el('create-neighborhood').value = opts.neighborhood || (venue ? venue.neighborhood : '');
     el('create-slots').value = opts.totalSlots || 4;
     el('create-budget-min').value = typeof opts.budgetMin === 'number' ? opts.budgetMin : 10;
     el('create-budget-max').value = typeof opts.budgetMax === 'number' ? opts.budgetMax : 30;
     el('create-time').value = opts.timeLabel || '';
+    el('create-format').value = opts.format || 'Solo';
+    el('create-pace').value = opts.pace || 'Chill';
+    el('create-minigroup').checked = !!opts.miniGroupPriority;
     el('create-buddies').innerHTML = buddyOptionsHtml(opts.buddyIds || []);
+    el('create-midpoint').checked = !!opts.midpointMode;
+    el('create-spot-name').value = opts.spotName || '';
+    state.selectedSpot = null;
+    toggleMidpointFields();
 
     openModal('create-modal');
-  }
+  };
 
-  function checkedBuddyIds() {
-    return Array.prototype.map.call(
-      document.querySelectorAll('#create-buddies input[data-buddy]:checked'),
-      function (box) { return box.value; }
-    );
-  }
+  const toggleMidpointFields = () => {
+    const on = el('create-midpoint').checked;
+    el('create-venue-field').style.display = on ? 'none' : '';
+    el('create-custom-spot-field').style.display = on ? 'none' : '';
+    el('midpoint-hint').hidden = !on;
+  };
 
-  function syncVenueDetails() {
-    var venueId = val('create-venue');
-    var venue = state.venues.filter(function (v) { return String(v.id) === String(venueId); })[0];
+  const checkedBuddyIds = () =>
+    Array.from(document.querySelectorAll('#create-buddies input[data-buddy]:checked')).map((box) => box.value);
+
+  const syncVenueDetails = () => {
+    const venue = findVenue(val('create-venue'));
     if (!venue) return;
     if (venue.neighborhood) el('create-neighborhood').value = venue.neighborhood;
-    if (venue.city) el('create-city').value = venue.city;
-  }
+    if (venue.city) ensureCityOption('create-city', venue.city) && (el('create-city').value = venue.city);
+  };
 
-  function submitCreate() {
-    var slots = Math.max(2, Math.min(8, num(val('create-slots'), 4)));
-    var min = Math.max(0, num(val('create-budget-min'), 0));
-    var max = Math.max(0, num(val('create-budget-max'), 0));
-    if (max < min) { var swap = min; min = max; max = swap; }
+  const submitCreate = async () => {
+    let min = Math.max(0, num(val('create-budget-min'), 0));
+    let max = Math.max(0, num(val('create-budget-max'), 0));
+    if (max < min) { const swap = min; min = max; max = swap; }
 
-    var payload = {
+    const midpointMode = el('create-midpoint').checked;
+    let venueId = val('create-venue');
+
+    if (!midpointMode && !venueId && state.selectedSpot) {
+      const venue = nearestVenue(state.selectedSpot.lat, state.selectedSpot.lng);
+      if (venue) { venueId = venue.id; el('create-venue').value = venue.id; }
+    }
+
+    const payload = {
       title: String(val('create-title') || '').trim(),
       theme: val('create-theme'),
       city: val('create-city'),
       neighborhood: String(val('create-neighborhood') || '').trim(),
-      totalSlots: slots,
+      totalSlots: clamp(num(val('create-slots'), 4), 2, 8),
       budgetMin: min,
       budgetMax: max,
       timeLabel: String(val('create-time') || '').trim(),
-      venueId: val('create-venue'),
-      buddyIds: checkedBuddyIds()
+      venueId: midpointMode ? '' : venueId,
+      buddyIds: checkedBuddyIds(),
+      guestId: myId(),
+      midpointMode,
+      format: val('create-format'),
+      pace: val('create-pace'),
+      miniGroupPriority: el('create-minigroup').checked
     };
 
     if (!payload.title) { showToast('Please give your party a title.', 'error'); return; }
-    if (!payload.venueId) { showToast('Please pick a venue for the party.', 'error'); return; }
-    if (!state.pro && createdCount() >= FREE_PARTIES) {
-      closeAllModals();
-      showToast('Free plan includes ' + FREE_PARTIES + ' parties. Go Pro for unlimited.', 'error');
-      openPaywall();
-      return;
-    }
-    if (!payload.neighborhood) payload.neighborhood = payload.city;
     if (!payload.timeLabel) payload.timeLabel = 'This weekend';
+    if (!payload.neighborhood) payload.neighborhood = payload.city;
+    if (!midpointMode && !payload.venueId) {
+      showToast('Pick a venue, or switch on Fair-Midpoint mode to let CrewParty choose one.', 'error');
+      return;
+    }
 
-    var submitBtn = document.querySelector('#create-form button[type="submit"]');
+    const submitBtn = document.querySelector('#create-form button[type="submit"]');
     if (submitBtn) submitBtn.disabled = true;
-
-    window.CrewApi.createParty(payload).then(function (party) {
-      bumpCreated();
+    try {
+      const party = await window.CrewApi.createParty(payload);
       closeAllModals();
-      return reloadData().then(function () {
-        renderAll();
-        switchTab('explore');
-        showToast('Party "' + party.title + '" is live. ' +
-          Math.max(0, (party.totalSlots - party.filledSlots)) + ' slot(s) still open.', 'success');
-        window.setTimeout(function () {
-          var card = document.querySelector('.party-card[data-party-id="' + attr(party.id) + '"]');
-          if (card) {
-            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            card.classList.add('flash');
-            window.setTimeout(function () { card.classList.remove('flash'); }, 1600);
-          }
-        }, 120);
-      });
-    }).catch(function (err) {
+      await refreshAfterChange(`Party "${party.title}" is live. ${Math.max(0, party.totalSlots - party.filledSlots)} slot(s) still open.`);
+      switchTab('explore');
+      window.setTimeout(() => {
+        const card = document.querySelector(`.party-card[data-party-id="${attr(party.id)}"]`);
+        if (card) {
+          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          card.classList.add('flash');
+          window.setTimeout(() => card.classList.remove('flash'), 1600);
+        }
+      }, 140);
+    } catch (err) {
       showToast('Could not create party: ' + err.message, 'error');
-    }).then(function () {
+    } finally {
       if (submitBtn) submitBtn.disabled = false;
-    });
-  }
+    }
+  };
 
-  function startPartyWithFriends() {
-    var buddyIds = state.friends.filter(function (f) {
-      return f.status === 'CORE_BUDDY' || f.status === 'FRIEND';
-    }).map(function (f) { return f.id; });
-
-    if (!buddyIds.length) {
-      showToast('No saved buddies yet — add players from Explore & Search first.', 'error');
+  const startPartyWithFriends = () => {
+    const buddies = state.friends.filter((f) => f.status === 'CORE_BUDDY' || f.status === 'FRIEND').map((f) => f.id);
+    const friends = state.presence.acceptedFriends || [];
+    if (!buddies.length && !friends.length) {
+      showToast('Add at least one friend or buddy first, then start a party together.', 'error');
       return;
     }
-    openCreateModal({ title: 'Crew Night with My Friends', buddyIds: buddyIds });
+    openCreateModal({ title: 'Crew Night with My Friends', buddyIds: buddies });
     showToast('Pick a theme and venue, then create your party.', 'info');
-  }
+  };
 
-  /* ---------------- chooser (join / invite) ---------------- */
+  /* ---------------- map spot picking ---------------- */
 
-  function openJoinChooser(partyId) {
-    var party = findParty(partyId);
-    if (!party) { showToast('That party is no longer available.', 'error'); return; }
+  const handleSpotPick = (spot) => {
+    state.selectedSpot = spot;
+    if (!el('create-modal').classList.contains('open')) openCreateModal({});
+    el('create-midpoint').checked = false;
+    toggleMidpointFields();
+    const input = el('create-spot-name');
+    if (input) { input.value = spot.name || ''; input.focus(); }
+    showToast('Spot dropped on the map. Name it and create your party.', 'info');
+  };
 
-    var candidates = state.friends.filter(function (f) {
-      return f.status === 'DISCOVER' || f.status === 'FRIEND';
+  const handleSpotResolved = (spot) => {
+    state.selectedSpot = spot;
+    const input = el('create-spot-name');
+    if (input && !input.value) input.value = spot.name || '';
+    if (spot.name) showToast(`Found: ${spot.name}.`, 'info');
+    else showToast('No named venue here \u2014 type a Custom Spot Name and we will match the closest public safe venue.', 'info');
+    if (!el('create-midpoint').checked) {
+      const venue = nearestVenue(spot.lat, spot.lng);
+      if (venue) { el('create-venue').value = venue.id; syncVenueDetails(); el('create-venue').value = venue.id; }
+    }
+  };
+
+  const startFromRadar = (node) => {
+    const event = (state.radar || []).find((e) => String(e.id) === String(node.dataset.eventId));
+    if (!event) { showToast('That event is no longer on the radar.', 'error'); return; }
+    const venue = nearestVenue(event.lat, event.lng);
+    openCreateModal({
+      title: event.title,
+      theme: RADAR_THEME[event.category] || 'Outdoor Casual',
+      city: event.city,
+      timeLabel: event.whenLabel,
+      venueId: venue ? venue.id : '',
+      budgetMin: 0,
+      budgetMax: Math.max(20, num(event.costPerPerson, 0) + 20),
+      neighborhood: venue ? venue.neighborhood : ''
     });
-    if (!candidates.length) {
-      showToast('No available friends to add yet. Add a player first.', 'error');
+    showToast(`Starting a crew at ${event.title}.`, 'info');
+  };
+
+  /* ---------------- GPS city detection ---------------- */
+
+  const ensureCityOption = (selectId, city) => {
+    const select = el(selectId);
+    if (!select || !city) return false;
+    if ([...select.options].some((o) => o.value === city)) return true;
+    select.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(city)}">${escapeHtml(city)}</option>`);
+    return true;
+  };
+
+  const detectCity = () => {
+    if (!navigator.geolocation) {
+      showToast('GPS is not available in this browser \u2014 pick a city from the dropdown instead.', 'error');
       return;
     }
+    showToast('Detecting your city\u2026', 'info');
+    navigator.geolocation.getCurrentPosition(async (position) => {
+      const lat = position.coords.latitude;
+      const lng = position.coords.longitude;
+      try {
+        const res = await window.CrewApi.gpsSeed(lat, lng, '');
+        ensureCityOption('global-city', res.city);
+        ensureCityOption('create-city', res.city);
+        ensureCityOption('venue-city-filter', res.city);
+        ensureCityOption('profile-city', res.city);
+        el('global-city').value = res.city;
+        state.filters.city = res.city;
+        await reloadAll();
+        await loadRadar();
+        await doSearch({ silent: true });
+        renderAll();
+        if (window.CrewMap) {
+          window.CrewMap.init('venue-map');
+          window.CrewMap.centerOn(res.centerLat, res.centerLng, 13);
+        }
+        showToast(`Demo pool ready in ${res.city}: ${count(res.venuesCreated, 'venue')} and ${count(res.partiesCreated, 'open slot')}.`, 'success');
+      } catch (err) {
+        showToast('GPS seeding failed: ' + err.message, 'error');
+      }
+    }, () => {
+      showToast('Location was blocked \u2014 pick a city from the dropdown instead.', 'error');
+    }, { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 });
+  };
 
-    state.chooser = { mode: 'join', partyId: partyId };
-    el('chooser-title').textContent = 'Add a player to "' + party.title + '"';
-    el('chooser-list').innerHTML = candidates.map(function (f) {
-      return '<div class="chooser-item">' +
-        '<div class="ci-main">' +
-          '<div class="ci-title">' + escapeHtml(f.name) + '</div>' +
-          '<div class="ci-sub">' + escapeHtml(f.ageRole || '') + ' • ' + escapeHtml(f.city || '') + '</div>' +
-        '</div>' +
-        '<button class="btn btn-primary btn-sm" data-action="choose-friend" data-friend-id="' + escapeHtml(f.id) + '">Add</button>' +
-      '</div>';
-    }).join('');
-    openModal('chooser-modal');
-  }
+  /* ---------------- join / queue / check-in ---------------- */
 
-  function openInviteChooser(friendId) {
-    var friend = findFriend(friendId);
-    if (!friend) { showToast('That player is no longer available.', 'error'); return; }
-
-    var open = state.results.parties.concat(state.openParties).filter(function (p) {
-      return p.filledSlots < p.totalSlots;
-    });
-    var seen = {};
-    open = open.filter(function (p) {
-      if (seen[p.id]) return false;
-      seen[p.id] = true;
-      return true;
-    });
-
-    if (!open.length) {
-      showToast('No open parties with a free slot right now. Create one first.', 'error');
-      return;
+  const joinSlot = async (partyId) => {
+    try {
+      const party = await window.CrewApi.joinParty(partyId, myId());
+      closeDrawer();
+      await refreshAfterChange(`You joined "${party.title}". ${Math.max(0, party.totalSlots - party.filledSlots)} slot(s) left.`);
+    } catch (err) {
+      showToast('Could not join slot: ' + err.message, 'error');
     }
+  };
 
-    state.chooser = { mode: 'invite', friendId: friendId };
-    el('chooser-title').textContent = 'Invite ' + friend.name + ' to a party';
-    el('chooser-list').innerHTML = open.map(function (p) {
-      return '<div class="chooser-item">' +
-        '<div class="ci-main">' +
-          '<div class="ci-title">' + escapeHtml(p.title) + '</div>' +
-          '<div class="ci-sub">' + escapeHtml(p.theme) + ' • ' + escapeHtml(p.city) + ' • ' + escapeHtml(p.filledSlots) + '/' + escapeHtml(p.totalSlots) + ' players</div>' +
-        '</div>' +
-        '<button class="btn btn-primary btn-sm" data-action="choose-party" data-party-id="' + escapeHtml(p.id) + '">Invite</button>' +
-      '</div>';
-    }).join('');
-    openModal('chooser-modal');
-  }
+  const joinQueue = async (partyId) => {
+    try {
+      const party = await window.CrewApi.queueForSlot(partyId, myId(), (state.identity && state.identity.displayName) || 'Guest');
+      closeDrawer();
+      await refreshAfterChange(`Added to the waitlist for "${party.title}".`);
+    } catch (err) {
+      showToast('Could not join the queue: ' + err.message, 'error');
+    }
+  };
 
-  function joinParty(partyId, friendId) {
-    var party = findParty(partyId);
-    var friend = findFriend(friendId);
-    return window.CrewApi.joinParty(partyId, friendId).then(function () {
-      closeAllModals();
-      return reloadData().then(function () {
-        renderAll();
-        showToast((friend ? friend.name : 'Your friend') + ' joined ' + (party ? '"' + party.title + '"' : 'the party') + '.', 'success');
-      });
-    }).catch(function (err) {
-      showToast('Could not join party: ' + err.message, 'error');
-    });
-  }
+  const checkIn = async (partyId) => {
+    try {
+      const party = await window.CrewApi.checkIn(partyId, myId());
+      await refreshAfterChange(`Safety check-in confirmed for "${party.title}". See you there.`);
+    } catch (err) {
+      showToast('Could not check in: ' + err.message, 'error');
+    }
+  };
 
-  /* ---------------- complete & rate ---------------- */
-
-  function completeParty(partyId) {
-    var party = findParty(partyId);
-    return window.CrewApi.completeParty(partyId).then(function (visit) {
-      return reloadData().then(function () {
-        state.highlightVisitId = visit && visit.id ? visit.id : null;
-        renderAll();
-        switchTab('history');
-        focusVisit(state.highlightVisitId);
-        showToast('Visit logged for ' + ((visit && visit.venueName) || (party && party.venueName) || 'the venue') +
-          '. Rate it below to help the crew.', 'success');
-      });
-    }).catch(function (err) {
+  const completeParty = async (partyId) => {
+    try {
+      const visit = await window.CrewApi.completeParty(partyId);
+      state.highlightVisitId = visit && visit.id ? visit.id : null;
+      await refreshAfterChange(`Visit logged for ${(visit && visit.venueName) || 'the venue'}. Rate it to help the crew.`);
+      switchTab('history');
+      focusVisit(state.highlightVisitId);
+    } catch (err) {
       showToast('Could not complete party: ' + err.message, 'error');
-    });
-  }
+    }
+  };
 
-  function submitRating(visitId) {
-    var draft = state.drafts[visitId] || { rating: 0, tags: [] };
-    var commentBox = el('comment-' + visitId);
-    var comment = commentBox ? String(commentBox.value || '').trim() : '';
+  /* ---------------- friends & invites ---------------- */
 
-    if (!draft.rating) {
-      showToast('Pick a star rating from 1 to 5 first.', 'error');
+  const addFriend = async (friendId) => {
+    try {
+      const friend = await window.CrewApi.addFriend(friendId);
+      await refreshAfterChange(`${(friend && friend.name) || 'That player'} is now in your crew.`);
+    } catch (err) {
+      showToast('Could not add friend: ' + err.message, 'error');
+    }
+  };
+
+  const requestFriend = async (guestId) => {
+    try {
+      const relation = await window.CrewApi.requestFriend(myId(), guestId);
+      await pollPresence();
+      showToast(`Friend request sent to ${relation.toName}.`, 'success');
+    } catch (err) {
+      showToast('Could not send friend request: ' + err.message, 'error');
+    }
+  };
+
+  const acceptFriend = async (requestId) => {
+    try {
+      const relation = await window.CrewApi.acceptFriend(requestId);
+      removeBanner(`req:${requestId}`);
+      if (state.seenKeys) state.seenKeys.delete(`req:${requestId}`);
+      await pollPresence();
+      showToast(`${relation.fromName} is now in your crew.`, 'success');
+    } catch (err) {
+      showToast('Could not accept friend request: ' + err.message, 'error');
+    }
+  };
+
+  const declineFriend = (requestId) => {
+    state.dismissedRequests.add(requestId);
+    removeBanner(`req:${requestId}`);
+    state.pending = state.pending.filter((n) => !(n.kind === 'friend' && n.request.id === requestId));
+    renderNotifPanel(state.pending);
+    const bell = el('notif-count');
+    bell.textContent = state.pending.length;
+    bell.hidden = state.pending.length === 0;
+    showToast('Friend request dismissed.', 'info');
+  };
+
+  const acceptInvite = async (inviteId) => {
+    try {
+      const invite = await window.CrewApi.respondInvite(inviteId, 'ACCEPT');
+      removeBanner(`invite:${inviteId}`);
+      if (state.seenKeys) state.seenKeys.delete(`invite:${inviteId}`);
+      await refreshAfterChange(`You joined "${invite.partyTitle}" from the invitation.`);
+    } catch (err) {
+      showToast('Could not accept the invitation: ' + err.message, 'error');
+    }
+  };
+
+  const declineInvite = async (inviteId) => {
+    try {
+      await window.CrewApi.respondInvite(inviteId, 'DECLINE');
+      removeBanner(`invite:${inviteId}`);
+      await pollPresence();
+      showToast('Invitation declined.', 'info');
+    } catch (err) {
+      showToast('Could not decline the invitation: ' + err.message, 'error');
+    }
+  };
+
+  const inviteToSlot = (guestId) => {
+    const guest = findGuestById(guestId);
+    const slots = mySlots();
+    if (!slots.length) {
+      showToast('Create a party first, then invite people into its free slots.', 'error');
       return;
     }
+    state.chooser = { mode: 'invite-guest', guestId };
+    el('chooser-title').textContent = `Invite ${guest ? guest.displayName : 'this guest'} to a slot`;
+    el('chooser-list').innerHTML = slots.map((p) =>
+      `<div class="chooser-item">
+        <div class="ci-main">
+          <div class="ci-title">${escapeHtml(p.title)}</div>
+          <div class="ci-sub">${escapeHtml(p.theme)} \u2022 ${escapeHtml(p.city)} \u2022 ${escapeHtml(p.filledSlots)}/${escapeHtml(p.totalSlots)} players</div>
+        </div>
+        <button class="btn btn-primary btn-sm" data-action="choose-slot" data-party-id="${attr(p.id)}">Invite</button>
+      </div>`).join('');
+    openModal('chooser-modal');
+  };
 
-    return window.CrewApi.rateVisit(visitId, {
-      rating: draft.rating,
-      tags: draft.tags.slice(),
-      comment: comment
-    }).then(function (updated) {
-      return reloadData().then(function () {
-        delete state.drafts[visitId];
-        state.highlightVisitId = null;
-        renderAll();
-        var venue = state.venues.filter(function (v) { return String(v.id) === String(updated.venueId); })[0];
-        var summary = venue
-          ? venue.avgRating.toFixed(1) + ' ★ (' + count(num(venue.ratingCount, 0), 'rating') + ')'
-          : count(draft.rating, 'star');
-        showToast('Thanks! ' + ((updated && updated.venueName) || 'The venue') + ' is now ' + summary, 'success');
-      });
-    }).catch(function (err) {
-      showToast('Could not save your rating: ' + err.message, 'error');
-    });
-  }
+  const chooseSlot = async (partyId) => {
+    if (!state.chooser || state.chooser.mode !== 'invite-guest') return;
+    const guestId = state.chooser.guestId;
+    try {
+      const invite = await window.CrewApi.createInvite(myId(), guestId, partyId);
+      closeAllModals();
+      showToast(`Invitation sent to ${invite.fromName ? '' : ''}${findGuestById(guestId) ? findGuestById(guestId).displayName : 'your friend'}.`, 'success');
+    } catch (err) {
+      showToast('Could not send the invite: ' + err.message, 'error');
+    }
+  };
 
-  /* ---------------- star picker + vibe tags ---------------- */
+  const sendInviteFromPanel = async () => {
+    const slotId = val('invite-slot-select');
+    const friendId = val('invite-friend-select');
+    if (!slotId || !friendId) { showToast('Pick a slot and a friend to invite.', 'error'); return; }
+    try {
+      await window.CrewApi.createInvite(myId(), friendId, slotId);
+      const guest = findGuestById(friendId);
+      showToast(`Invitation sent to ${guest ? guest.displayName : 'your friend'}.`, 'success');
+    } catch (err) {
+      showToast('Could not send the invite: ' + err.message, 'error');
+    }
+  };
 
-  function draftFor(visitId) {
+  /* ---------------- rating ---------------- */
+
+  const draftFor = (visitId) => {
     if (!state.drafts[visitId]) state.drafts[visitId] = { rating: 0, tags: [] };
     return state.drafts[visitId];
-  }
+  };
 
-  function paintStars(form) {
-    var visitId = form.dataset.visitId;
-    var rating = draftFor(visitId).rating;
-    Array.prototype.forEach.call(form.querySelectorAll('.star'), function (star) {
-      var value = Number(star.dataset.value);
+  const paintStars = (form) => {
+    const rating = draftFor(form.dataset.visitId).rating;
+    form.querySelectorAll('.star').forEach((star) => {
+      const value = Number(star.dataset.value);
       star.classList.toggle('is-selected', value <= rating);
       star.setAttribute('aria-checked', String(value === rating));
     });
-    var label = form.querySelector('.star-value');
-    if (label) label.textContent = rating ? rating + ' / 5' : 'Not rated';
-  }
+    const label = form.querySelector('.star-value');
+    if (label) label.textContent = rating ? `${rating} / 5` : 'Not rated';
+  };
 
-  function pickStar(star) {
-    var form = star.closest('.rating-form');
+  const pickStar = (star) => {
+    const form = star.closest('.rating-form');
     if (!form) return;
     draftFor(form.dataset.visitId).rating = Number(star.dataset.value);
     paintStars(form);
-  }
+  };
 
-  function toggleTag(chip) {
-    var form = chip.closest('.rating-form');
+  const toggleTag = (chip) => {
+    const form = chip.closest('.rating-form');
     if (!form) return;
-    var draft = draftFor(form.dataset.visitId);
-    var tag = chip.dataset.tag;
-    var index = draft.tags.indexOf(tag);
+    const draft = draftFor(form.dataset.visitId);
+    const tag = chip.dataset.tag;
+    const index = draft.tags.indexOf(tag);
     if (index === -1) draft.tags.push(tag); else draft.tags.splice(index, 1);
     chip.classList.toggle('chip-active', index === -1);
     chip.setAttribute('aria-pressed', String(index === -1));
-  }
+  };
 
-  function hoverStars(star, on) {
-    var form = star.closest('.rating-form');
-    if (!form) return;
-    var value = Number(star.dataset.value);
-    Array.prototype.forEach.call(form.querySelectorAll('.star'), function (s) {
-      s.classList.toggle('is-hover', on && Number(s.dataset.value) <= value);
-    });
-  }
+  const submitRating = async (visitId) => {
+    const draft = state.drafts[visitId] || { rating: 0, tags: [] };
+    const commentBox = el(`comment-${visitId}`);
+    const comment = commentBox ? String(commentBox.value || '').trim() : '';
+    if (!draft.rating) { showToast('Pick a star rating from 1 to 5 first.', 'error'); return; }
+    try {
+      const updated = await window.CrewApi.rateVisit(visitId, { rating: draft.rating, tags: draft.tags.slice(), comment });
+      delete state.drafts[visitId];
+      state.highlightVisitId = null;
+      await reloadAll();
+      renderVenues();
+      renderVenueMini();
+      renderHistory();
+      const venue = findVenue(updated.venueId);
+      const summary = venue ? `${venue.avgRating.toFixed(1)} \u2605 (${count(num(venue.ratingCount, 0), 'rating')})` : count(draft.rating, 'star');
+      showToast(`Thanks! ${(updated && updated.venueName) || 'The venue'} is now ${summary}.`, 'success');
+    } catch (err) {
+      showToast('Could not save your rating: ' + err.message, 'error');
+    }
+  };
 
-  /* ---------------- friends ---------------- */
+  /* ---------------- profile ---------------- */
 
-  function addFriend(friendId) {
-    return window.CrewApi.addFriend(friendId).then(function (friend) {
-      state.addedIds[friendId] = true;
-      var existing = findFriend(friendId);
-      if (existing) {
-        existing.status = friend && friend.status ? friend.status : 'FRIEND';
-      } else if (friend) {
-        state.friends.push(friend);
-      }
-      renderAll();
-      showToast((friend && friend.name ? friend.name : 'That player') + ' is now in your crew.', 'success');
-    }).catch(function (err) {
-      showToast('Could not add friend: ' + err.message, 'error');
-    });
-  }
+  const submitProfile = async (event) => {
+    event.preventDefault();
+    const age = clamp(num(val('profile-age'), 0), 0, 120);
+    const role = String(val('profile-role') || '').trim();
+    const ageRole = age ? `${age}${role ? ` \u2022 ${role}` : ''}` : role;
+
+    let min = Math.max(0, num(val('profile-budget-min'), 0));
+    let max = Math.max(0, num(val('profile-budget-max'), 40));
+    if (max < min) { const swap = min; min = max; max = swap; }
+
+    const badges = [];
+    if (el('profile-id').checked) badges.push('ID Verified');
+    if (el('profile-linkedin').checked) badges.push('LinkedIn Verified');
+    if (badges.length === 0) badges.push('Shared Interests');
+
+    const payload = {
+      guestId: myId(),
+      displayName: String(val('profile-name') || '').trim() || undefined,
+      ageRole: ageRole || undefined,
+      city: val('profile-city'),
+      neighborhood: String(val('profile-neighborhood') || '').trim() || undefined,
+      budgetMin: min,
+      budgetMax: max,
+      format: val('profile-format'),
+      pace: val('profile-pace'),
+      publicVenuesOnly: el('profile-public').checked,
+      miniGroupPriority: el('profile-minigroup').checked,
+      verificationBadges: badges
+    };
+
+    try {
+      const updated = await window.CrewApi.updateProfile(payload);
+      state.identity = { ...state.identity, ...updated };
+      renderIdentity();
+      applyProfileDefaults();
+      showToast('Profile saved. Your defaults now shape matching and invites.', 'success');
+    } catch (err) {
+      showToast('Could not save your profile: ' + err.message, 'error');
+    }
+  };
 
   /* ---------------- paywall ---------------- */
 
-  function openPaywall() {
+  const openPaywall = () => {
     if (state.pro) {
       el('paywall-form').hidden = true;
       el('paywall-success').hidden = false;
@@ -1115,166 +1544,161 @@
       el('paywall-success').hidden = true;
     }
     openModal('paywall-modal');
-  }
+  };
 
-  function startPro(button) {
+  const startPro = (button) => {
     button.disabled = true;
-    button.textContent = 'Processing…';
-    window.CrewApi.checkout().then(function (res) {
+    button.textContent = 'Processing\u2026';
+    window.CrewApi.checkout().then((res) => {
       state.pro = true;
       try { window.localStorage.setItem(PRO_KEY, 'true'); } catch (e) { /* storage may be unavailable */ }
       applyProState();
       el('paywall-form').hidden = true;
       el('paywall-success').hidden = false;
-      showToast((res && res.plan ? res.plan : 'CrewParty Pro') + ' unlocked' +
-        (res && res.amountUsd ? ' for $' + res.amountUsd + '/mo' : '') + '. Welcome aboard!', 'success');
-    }).catch(function (err) {
+      showToast(`${(res && res.plan) || 'CrewParty Pro'} unlocked${res && res.amountUsd ? ` for $${res.amountUsd}/mo` : ''}. Welcome aboard!`, 'success');
+    }).catch((err) => {
       showToast('Checkout failed: ' + err.message, 'error');
-    }).then(function () {
+    }).then(() => {
       button.disabled = false;
-      button.textContent = 'Start Pro — Test Mode';
+      button.textContent = 'Start Pro \u2014 Test Mode';
     });
-  }
-
-  /* ---------------- venue highlight ---------------- */
-
-  function viewVenue(venueId) {
-    var cards = document.querySelectorAll('.venue-card[data-venue-id="' + attr(venueId) + '"]');
-    if (!cards.length) {
-      showToast('That venue card is not on screen right now.', 'info');
-      return;
-    }
-    Array.prototype.forEach.call(cards, function (card) {
-      card.classList.add('flash');
-      window.setTimeout(function () { card.classList.remove('flash'); }, 1600);
-    });
-    cards[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-    if (window.CrewMap) window.CrewMap.highlightVenue(venueId);
-  }
+  };
 
   /* ---------------- event wiring ---------------- */
 
-  var CLICK_ACTIONS = {
-    'switch-tab': function (node) { switchTab(node.dataset.tab); },
-    'toggle-filters': function () { toggleFilters(); },
-    'toggle-notif': function () { toggleNotif(); },
-    'detect-city': function () { detectCity(); },
-    'quick-theme': function (node) {
-      var t = node.dataset.theme || '';
+  const CLICK_ACTIONS = {
+    'switch-tab': (node) => switchTab(node.dataset.tab),
+    'toggle-notif': (node) => toggleNotif(node),
+    'open-paywall': () => openPaywall(),
+    'close-modal': (node) => closeModalFrom(node),
+    'start-pro': (node) => startPro(node),
+    'search': () => { doSearch(); closeFilters(); },
+    'toggle-filters': () => toggleFilters(),
+    'close-filters': () => closeFilters(),
+    'quick-theme': (node) => {
+      let t = node.dataset.theme || '';
       if (t && val('filter-theme') === t) t = '';
       el('filter-theme').value = t;
-      doSearch(true);
+      doSearch({ silent: true });
     },
-    'open-paywall': function () { openPaywall(); },
-    'close-modal': function (node) { closeModalFrom(node); },
-    'start-pro': function (node) { startPro(node); },
-    'search': function () { doSearch(); },
-    'reset-filters': function () { resetFilters(); },
-    'open-create': function () { openCreateModal({}); },
-    'join-party': function (node) { openJoinChooser(node.dataset.partyId); },
-    'complete-party': function (node) { completeParty(node.dataset.partyId); },
-    'add-friend': function (node) { addFriend(node.dataset.friendId); },
-    'invite-player': function (node) { openInviteChooser(node.dataset.friendId); },
-    'choose-friend': function (node) {
-      if (!state.chooser) return;
-      joinParty(state.chooser.partyId, node.dataset.friendId);
-    },
-    'choose-party': function (node) {
-      if (!state.chooser) return;
-      joinParty(node.dataset.partyId, state.chooser.friendId);
-    },
-    'start-party-with-friends': function () { startPartyWithFriends(); },
-    'star-pick': function (node) { pickStar(node); },
-    'toggle-tag': function (node) { toggleTag(node); },
-    'submit-rating': function (node) { submitRating(node.dataset.visitId); },
-    'view-venue': function (node) { viewVenue(node.dataset.venueId); }
+    'reset-filters': () => resetFilters(),
+    'open-create': () => openCreateModal({}),
+    'gps-detect': () => detectCity(),
+    'pick-format': (node) => { state.filters.format = node.dataset.format; setActivePill(el('format-pills'), node); doSearch({ silent: true }); },
+    'pick-pace': (node) => { state.filters.pace = node.dataset.pace; setActivePill(el('pace-pills'), node); doSearch({ silent: true }); },
+    'close-drawer': () => closeDrawer(),
+    'start-party-with-friends': () => startPartyWithFriends(),
+    'open-venue': (node) => openVenueDrawer(node.dataset.venueId),
+    'join-party': (node) => joinSlot(node.dataset.partyId),
+    'queue-party': (node) => joinQueue(node.dataset.partyId),
+    'checkin-party': (node) => checkIn(node.dataset.partyId),
+    'complete-party': (node) => completeParty(node.dataset.partyId),
+    'add-friend': (node) => addFriend(node.dataset.friendId),
+    'request-friend': (node) => requestFriend(node.dataset.guestId),
+    'accept-friend': (node) => acceptFriend(node.dataset.requestId),
+    'decline-friend': (node) => declineFriend(node.dataset.requestId),
+    'invite-to-slot': (node) => inviteToSlot(node.dataset.guestId),
+    'choose-slot': (node) => chooseSlot(node.dataset.partyId),
+    'send-invite': () => sendInviteFromPanel(),
+    'accept-invite': (node) => acceptInvite(node.dataset.inviteId),
+    'decline-invite': (node) => declineInvite(node.dataset.inviteId),
+    'radar-start': (node) => startFromRadar(node),
+    'dismiss-banner': (node) => dismissBanner(node),
+    'star-pick': (node) => pickStar(node),
+    'toggle-tag': (node) => toggleTag(node),
+    'submit-rating': (node) => submitRating(node.dataset.visitId)
   };
 
-  var CHANGE_ACTIONS = {
-    'global-city': function () { doSearch(true); },
-    'filter-change': function () { doSearch(true); },
-    'create-city': function () { fillVenueSelect(val('create-city')); },
-    'create-venue': function () { syncVenueDetails(); },
-    'venue-sort': function () { state.venueSort = val('venue-sort'); renderVenues(); },
-    'venue-city-filter': function () { state.venueCity = val('venue-city-filter'); renderVenues(); }
+  const CHANGE_ACTIONS = {
+    'filter-change': () => doSearch({ silent: true }),
+    'city-change': () => { readFilters(); loadRadar(); doSearch(); },
+    'create-city': () => { fillVenueSelect(val('create-city')); },
+    'create-venue': () => syncVenueDetails(),
+    'toggle-midpoint': () => toggleMidpointFields(),
+    'venue-sort': () => { state.venueSort = val('venue-sort'); renderVenues(); },
+    'venue-city-filter': () => { state.venueCity = val('venue-city-filter'); renderVenues(); }
   };
 
-  function handleClick(event) {
-    var target = event.target;
+  const handleClick = (event) => {
+    const target = event.target;
     if (!target || !target.closest) return;
-    var node = target.closest('[data-action]');
-    if (!node || node.tagName === 'SELECT') return;
-    var handler = CLICK_ACTIONS[node.dataset.action];
-    if (!handler) return;
-    handler(node, event);
-  }
 
-  function handleChange(event) {
-    var target = event.target;
-    if (!target || !target.closest) return;
-    var node = target.closest('[data-action]');
-    if (!node) return;
-    var handler = CHANGE_ACTIONS[node.dataset.action];
-    if (!handler) return;
-    handler(node, event);
-  }
-
-  function handleSubmit(event) {
-    if (event.target && event.target.id === 'create-form') {
-      event.preventDefault();
-      submitCreate();
+    const bell = target.closest('#notif-bell');
+    if (!bell && !target.closest('#notif-panel')) {
+      const panel = el('notif-panel');
+      if (panel && !panel.hidden) { panel.hidden = true; el('notif-bell').setAttribute('aria-expanded', 'false'); }
     }
-  }
 
-  function handleStarHover(event) {
-    var star = event.target.closest ? event.target.closest('.star') : null;
-    if (!star) return;
-    hoverStars(star, true);
-  }
+    const node = target.closest('[data-action]');
+    if (!node || node.tagName === 'SELECT') return;
+    const handler = CLICK_ACTIONS[node.dataset.action];
+    if (handler) handler(node, event);
+  };
 
-  function handleStarLeave(event) {
-    var star = event.target.closest ? event.target.closest('.star') : null;
-    if (!star) return;
-    var next = event.relatedTarget;
-    if (next && next.closest && next.closest('.star')) return; // still moving between stars
-    hoverStars(star, false);
-  }
+  const handleChange = (event) => {
+    const node = event.target.closest ? event.target.closest('[data-action]') : null;
+    if (!node) return;
+    const handler = CHANGE_ACTIONS[node.dataset.action];
+    if (handler) handler(node, event);
+  };
 
-  function bindEvents() {
+  const handleInput = (event) => {
+    const id = event.target.id;
+    if (id === 'budget-min' || id === 'budget-max') syncBudget();
+  };
+
+  const handleSubmit = (event) => {
+    if (event.target && event.target.id === 'create-form') { event.preventDefault(); submitCreate(); }
+    if (event.target && event.target.id === 'profile-form') submitProfile(event);
+  };
+
+  const bindEvents = () => {
     document.addEventListener('click', handleClick);
     document.addEventListener('change', handleChange);
+    document.addEventListener('input', handleInput);
     document.addEventListener('submit', handleSubmit);
-    document.addEventListener('mouseover', handleStarHover);
-    document.addEventListener('mouseout', handleStarLeave);
-    document.addEventListener('focusin', handleStarHover);
-    document.addEventListener('focusout', handleStarLeave);
-    document.addEventListener('keydown', function (event) {
-      if (event.key === 'Escape') closeAllModals();
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') { closeAllModals(); closeDrawer(); closeFilters(); }
     });
-  }
+  };
 
   /* ---------------- boot ---------------- */
 
-  function init() {
-    state.pro = false;
+  const init = async () => {
     try { state.pro = window.localStorage.getItem(PRO_KEY) === 'true'; } catch (e) { state.pro = false; }
-
     applyProState();
     bindEvents();
+    syncBudget();
 
-    if (window.CrewMap) window.CrewMap.init('venue-map');
+    if (window.CrewMap) {
+      window.CrewMap.init('venue-map');
+      window.CrewMap.setHandlers({
+        onVenueSelect: (venueId) => openVenueDrawer(venueId),
+        onSpotPick: (spot) => handleSpotPick(spot),
+        onSpotResolved: (spot) => handleSpotResolved(spot)
+      });
+    }
 
-    window.CrewApi.health().catch(function () {
-      showToast('Backend health check failed — some actions may not work.', 'error');
-    });
+    window.CrewApi.health().catch(() => showToast('Backend health check failed \u2014 some actions may not work.', 'error'));
 
-    loadBootstrap();
-    initIdentity();
-    document.addEventListener('click', function (e) {
-      var panel = el('notif-panel');
-      if (panel && !panel.hidden && !e.target.closest('.notif-wrap')) toggleNotif();
-    });
-  }
+    try {
+      await initIdentity();
+    } catch (err) {
+      showToast('Could not start a live session: ' + err.message, 'error');
+    }
+
+    try {
+      await reloadAll();
+    } catch (err) {
+      showToast('Could not load CrewParty data: ' + err.message, 'error');
+    }
+
+    state.loaded = true;
+    await doSearch({ silent: true });
+    await loadRadar();
+    startPresencePolling();
+    if (state.tab === 'profile') renderProfile();
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
