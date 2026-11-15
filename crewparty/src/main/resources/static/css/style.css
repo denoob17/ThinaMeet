@@ -136,6 +136,11 @@ ul { margin: 0; padding: 0; list-style: none; }
 .view-head-controls { display: flex; gap: 12px; flex-wrap: wrap; }
 
 .section-title { font-size: 18px; margin: 0 0 12px; }
+.count-pill {
+  display: inline-block; margin-left: 8px; padding: 1px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; vertical-align: middle;
+  background: rgba(222, 132, 51, .16); color: #f3b36b; border: 1px solid rgba(222, 132, 51, .32);
+}
 .section-sub { color: var(--text-dim); font-size: 13.5px; margin-top: -6px; }
 
 .explore-grid {
@@ -419,7 +424,8 @@ ul { margin: 0; padding: 0; list-style: none; }
 .empty-title { display: block; font-weight: 700; color: var(--text); margin-bottom: 4px; }
 
 /* ---------------- Modals ---------------- */
-.modal { display: none; position: fixed; inset: 0; z-index: 2000; }
+/* Sits above the venue drawer (scrim 2400 / panel 2500) so checkout and Create Party always win. */
+.modal { display: none; position: fixed; inset: 0; z-index: 3200; }
 .modal.open { display: block; }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(4, 7, 11, .68); backdrop-filter: blur(3px); animation: fadeIn .18s ease; }
 .modal-panel {
@@ -719,6 +725,20 @@ ul { margin: 0; padding: 0; list-style: none; }
    ============================================================ */
 .map-panel { padding: 12px; }
 .map-hint { font-size: 12.5px; color: var(--text-faint); margin-top: 10px; }
+/* Hint shown above the map while a party spot is waiting to be picked. */
+.map-pick-banner {
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #ffe9cf;
+  background: linear-gradient(180deg, rgba(222, 132, 51, .28), rgba(222, 132, 51, .14));
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  text-align: center;
+  animation: pulse 1.8s ease-in-out infinite;
+}
+.pick-spot-btn { margin-top: 8px; width: 100%; }
 
 .radar-strip {
   display: flex; gap: 14px;
@@ -758,14 +778,76 @@ ul { margin: 0; padding: 0; list-style: none; }
 }
 .crew-pin-featured .crew-pin-dot { background: radial-gradient(circle at 35% 30%, #ffd777, #de8433 70%, #c25a2a); }
 .crew-pin-safe .crew-pin-dot { background: radial-gradient(circle at 35% 30%, #7fb2ff, #2f6bd8 75%); }
+/* A venue that has open slots right now: warm pin with a soft halo so it reads as "live". */
+.crew-pin-active .crew-pin-dot {
+  background: radial-gradient(circle at 35% 30%, #d6ffe9, #1fbf7a 72%, #0f8a55);
+  border-color: #ecfff6;
+  box-shadow: 0 0 0 5px rgba(31, 191, 122, .22), 0 3px 10px rgba(0, 0, 0, .5);
+}
+.crew-pin-active .crew-pin-core { background: #ffffff; }
 .crew-pin-custom .crew-pin-dot {
   background: radial-gradient(circle at 35% 30%, #7ff0d0, #17a67c 78%);
   border-color: #eafff8;
   animation: pulse 1.8s ease-in-out infinite;
 }
+/* The caller's own GPS position: a pulsing blue dot over a soft accuracy halo. */
+.crew-pin-me-dot {
+  position: absolute; inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #cfe4ff, #3f8cff 70%, #1e5fd0);
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 6px rgba(63, 140, 255, .22), 0 3px 10px rgba(0, 0, 0, .5);
+  animation: mePulse 1.8s ease-in-out infinite;
+}
+.crew-pin-me-core {
+  position: absolute; top: 50%; left: 50%;
+  width: 8px; height: 8px; margin: -4px 0 0 -4px;
+  border-radius: 50%; background: #ffffff;
+}
+@keyframes mePulse {
+  0%, 100% { box-shadow: 0 0 0 6px rgba(63, 140, 255, .22), 0 3px 10px rgba(0, 0, 0, .5); }
+  50% { box-shadow: 0 0 0 13px rgba(63, 140, 255, .05), 0 3px 10px rgba(0, 0, 0, .5); }
+}
+.crew-me-accuracy { pointer-events: none; }
 .leaflet-tooltip .tip { font-size: 12.5px; line-height: 1.35; }
 .leaflet-tooltip .tip strong { display: block; font-size: 13px; margin-bottom: 2px; }
 .leaflet-tooltip .tip-safe { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 700; color: #137a4f; }
+.leaflet-tooltip .tip-featured {
+  display: inline-block; margin: 4px 6px 0 0; padding: 1px 7px;
+  font-size: 10.5px; font-weight: 800; letter-spacing: .02em; text-transform: uppercase;
+  color: #3a1d06; background: linear-gradient(180deg, #ffd777, #de8433);
+  border-radius: 999px;
+}
+.leaflet-tooltip .tip-custom {
+  display: inline-block; margin-top: 4px; padding: 1px 7px;
+  font-size: 10.5px; font-weight: 800; letter-spacing: .02em; text-transform: uppercase;
+  color: #062f24; background: radial-gradient(circle at 35% 30%, #7ff0d0, #17a67c);
+  border-radius: 999px;
+}
+/* "n slots open now" badge so a pin with live slots announces itself in the tooltip. */
+.leaflet-tooltip .tip-slots {
+  display: inline-block; margin: 4px 0 0; padding: 1px 8px;
+  font-size: 10.5px; font-weight: 800; letter-spacing: .02em;
+  color: #04301f; background: linear-gradient(180deg, #9dffcf, #1fbf7a);
+  border-radius: 999px;
+}
+/* Briefly flares a party card that was reached by clicking its pin on the map. */
+.party-card.is-highlighted {
+  border-color: #1fbf7a;
+  box-shadow: 0 0 0 3px rgba(31, 191, 122, .22), var(--shadow);
+}
+
+.map-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; }
+.legend-item { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); }
+.legend-pin {
+  flex: 0 0 auto;
+  width: 13px; height: 13px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .8);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .45);
+}
+.legend-featured { background: radial-gradient(circle at 35% 30%, #ffd777, #de8433 70%, #c25a2a); }
+.legend-safe { background: radial-gradient(circle at 35% 30%, #7fb2ff, #2f6bd8 75%); }
+.legend-custom { background: radial-gradient(circle at 35% 30%, #7ff0d0, #17a67c 78%); }
 
 /* ============================================================
    Badges (demo pool / safe spot / trust / midpoint / friends)
@@ -780,6 +862,43 @@ ul { margin: 0; padding: 0; list-style: none; }
 .badge-verified { background: rgba(46, 204, 113, .14); color: #79e0a4; border: 1px solid rgba(46, 204, 113, .34); }
 .badge-slot { background: rgba(222, 132, 51, .16); color: #f3b36b; border: 1px solid rgba(222, 132, 51, .32); }
 .badge-queue { background: rgba(255, 107, 107, .14); color: #ff9d9d; border: 1px solid rgba(255, 107, 107, .34); }
+.badge-pro {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  vertical-align: middle;
+  background: linear-gradient(180deg, #ffd777, #de8433);
+  color: #3a1d06;
+  border: 1px solid rgba(255, 215, 119, .55);
+}
+
+/* ============================================================
+   Venue Insights (CrewParty Pro)
+   ============================================================ */
+.venue-insights {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, rgba(222, 132, 51, .1), rgba(222, 132, 51, .04));
+  border: 1px solid rgba(222, 132, 51, .26);
+}
+.vi-head {
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: #f3b36b;
+}
+.vi-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.vi-list li { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; }
+.vi-list li span { color: var(--text-faint); }
+.vi-list li strong { color: var(--text); font-weight: 600; text-align: right; }
+.vi-blur { filter: blur(4px); opacity: .65; user-select: none; pointer-events: none; }
+.vi-unlock { margin-top: 8px; width: 100%; }
 
 /* ============================================================
    Friends & live invites
@@ -839,6 +958,9 @@ ul { margin: 0; padding: 0; list-style: none; }
   border-radius: var(--radius-sm);
   padding: 14px;
 }
+/* Join / Leave / Check-In buttons inside the party drawer. */
+.drawer-actions { margin-top: 0; }
+.drawer-actions .btn { flex: 1 1 auto; }
 .slot-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .slot-title { font-size: 14.5px; font-weight: 700; }
 .slot-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--text-dim); font-size: 12.5px; margin-top: 8px; }

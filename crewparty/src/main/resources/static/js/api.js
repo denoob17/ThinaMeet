@@ -104,6 +104,7 @@
     }),
     checkIn: (id, guestId) => send('POST', `/parties/${encodeURIComponent(id)}/checkin`, { guestId }),
     completeParty: (id) => send('POST', `/parties/${encodeURIComponent(id)}/complete`),
+    leaveParty: (id, guestId) => send('POST', `/parties/${encodeURIComponent(id)}/leave`, { guestId }),
 
     /* ---------------- history ---------------- */
 
@@ -127,6 +128,6 @@
     /* ---------------- profile & billing ---------------- */
 
     updateProfile: (payload) => send('PUT', '/profile', payload),
-    checkout: () => send('POST', '/checkout')
+    checkout: (guestId) => send('POST', '/checkout', guestId ? { guestId } : undefined)
   };
 })();

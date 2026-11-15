@@ -15,13 +15,13 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Thread-safe, in-memory store seeded with realistic US demo data.
@@ -42,12 +42,6 @@ public class InMemoryStoreRepository {
     private final List<SlotInvite> slotInvites = new CopyOnWriteArrayList<>();
     private final List<RadarEvent> radarEvents = new CopyOnWriteArrayList<>();
 
-    /**
-     * Roughly-100 m cell of the GPS centre that already produced a demo pool, keyed by city.
-     * Lets a repeated {@code /api/gps/seed} return the existing pool instead of regenerating it.
-     */
-    private final Map<String, String> seededCenters = new ConcurrentHashMap<>();
-
     private final AtomicInteger partySequence = new AtomicInteger(3);
     private final AtomicInteger visitSequence = new AtomicInteger(2);
     private final AtomicInteger venueSequence = new AtomicInteger(8);
@@ -56,6 +50,13 @@ public class InMemoryStoreRepository {
     private final AtomicInteger inviteSequence = new AtomicInteger(0);
     private final AtomicInteger radarSequence = new AtomicInteger(0);
     private final AtomicInteger personaIndex = new AtomicInteger(0);
+
+    /**
+     * Monotonic revision of the shared party/venue data. Every open tab polls {@code GET /api/presence}
+     * and reloads itself only when this number moves, which is what keeps the map and the open slots
+     * in sync across users without any websocket.
+     */
+    private final AtomicLong stateRevision = new AtomicLong(1);
 
     /**
      * The ambient "who else is in town" crowd. Their heartbeat is refreshed instead of being aged out,
@@ -284,7 +285,6 @@ public class InMemoryStoreRepository {
         GuestSession session = new GuestSession(guestId, persona.displayName(), persona.ageRole(),
                 city, neighborhood, persona.lat(), persona.lng(), persona.format(), persona.pace(),
                 persona.budgetMin(), persona.budgetMax(), persona.verificationBadges());
-        session.setPublicVenuesOnly(true);
         session.setMiniGroupPriority(GuestSession.SOLO.equals(persona.format()));
         return session;
     }
@@ -293,6 +293,18 @@ public class InMemoryStoreRepository {
     public record GuestPersona(String displayName, String ageRole, String city, String neighborhood,
                                double lat, double lng, String format, String pace,
                                int budgetMin, int budgetMax, List<String> verificationBadges) {
+    }
+
+    // ------------------------------------------------------- state revision
+
+    /** Latest revision of the shared party/venue data; clients reload when this value changes. */
+    public long getStateRevision() {
+        return stateRevision.get();
+    }
+
+    /** Marks the shared data as changed so every open tab picks the update up on its next poll. */
+    public void bumpRevision() {
+        stateRevision.incrementAndGet();
     }
 
     // --------------------------------------------------------------- friends
@@ -317,6 +329,7 @@ public class InMemoryStoreRepository {
 
     public Venue saveVenue(Venue venue) {
         venues.add(venue);
+        bumpRevision();
         return venue;
     }
 
@@ -324,15 +337,14 @@ public class InMemoryStoreRepository {
         return "v" + venueSequence.incrementAndGet();
     }
 
-    /** Dedupe guard for GPS seeding: same city + same ~100 m cell means "already generated". */
+    /**
+     * Dedupe guard for GPS seeding: any already-generated demo pool within 15 km of the caller is
+     * reused instead of flooding the store with a second, nearly identical set of venues.
+     */
     public boolean hasVenueNear(String city, double lat, double lng) {
-        String cell = round3(lat) + "," + round3(lng);
-        return cell.equals(seededCenters.get(cityKey(city)));
-    }
-
-    /** Remembers that {@code city} already produced a demo pool at this ~100 m cell. */
-    public void markSeeded(String city, double lat, double lng) {
-        seededCenters.put(cityKey(city), round3(lat) + "," + round3(lng));
+        return venues.stream()
+                .filter(Venue::isDemoPool)
+                .anyMatch(venue -> haversineKm(lat, lng, venue.getLat(), venue.getLng()) <= 15.0);
     }
 
     // ---------------------------------------------------------------- parties
@@ -351,6 +363,7 @@ public class InMemoryStoreRepository {
 
     public Party saveParty(Party party) {
         parties.add(party);
+        bumpRevision();
         return party;
     }
 
@@ -383,6 +396,7 @@ public class InMemoryStoreRepository {
             venue.setActiveSlotCount(activeSlots.getOrDefault(venue.getId(), 0));
             venue.setQueueCount(queued.getOrDefault(venue.getId(), 0));
         }
+        bumpRevision();
     }
 
     // ------------------------------------------------------------ visit history
@@ -533,11 +547,14 @@ public class InMemoryStoreRepository {
         return relation.getFromGuestId().equals(guestId) || relation.getToGuestId().equals(guestId);
     }
 
-    private String cityKey(String city) {
-        return city == null ? "" : city.trim().toLowerCase(Locale.ROOT);
-    }
-
-    private double round3(double value) {
-        return Math.round(value * 1000.0) / 1000.0;
+    /** Great-circle distance in kilometres - used by the GPS dedupe guard. */
+    private static double haversineKm(double lat1, double lng1, double lat2, double lng2) {
+        double earthRadiusKm = 6371.0;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLng = Math.toRadians(lng2 - lng1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 }

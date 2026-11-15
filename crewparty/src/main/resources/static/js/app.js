@@ -47,7 +47,12 @@
     drafts: {},                  // visitId -> { rating, tags }
     chooser: null,               // { mode, guestId?, partyId? }
     highlightVisitId: null,
-    selectedSpot: null,          // { lat, lng, name } dropped on the map
+    selectedSpot: null,          // { lat, lng, name, category, isListedPlace } dropped/picked on the map
+    spotNameDirty: false,        // true once the user typed a Custom spot name themselves
+    createDraft: null,           // Create Party form values parked while the user picks a spot on the map
+    pickingMapSpot: false,       // true while the map is armed to receive the Create Party spot
+    lastRevision: null,          // last shared-data revision we rendered; drives the live cross-tab sync
+    openDrawerVenueId: null,     // venue whose drawer is open right now, so a live refresh can reload it
     loaded: false
   };
 
@@ -111,6 +116,10 @@
 
   const mySlots = () => allOpenParties().filter((p) => (p.memberGuestIds || []).includes(myId()));
 
+  /** Parties this tab hosts right now (the host is always the first memberGuestId). */
+  const hostedActiveCount = () =>
+    allOpenParties().filter((p) => (p.memberGuestIds || [])[0] === myId()).length;
+
   const acceptedFriendIds = () => {
     const ids = new Set();
     (state.presence.acceptedFriends || []).forEach((relation) => {
@@ -119,7 +128,8 @@
     return ids;
   };
 
-  const nearestVenue = (lat, lng) => {
+  /** Closest CrewParty venue. With maxKm set, anything farther away resolves to null. */
+  const nearestVenue = (lat, lng, maxKm) => {
     let best = null;
     let bestDistance = Infinity;
     state.venues.forEach((v) => {
@@ -127,6 +137,7 @@
       const d = haversineKm(lat, lng, v.lat, v.lng);
       if (d < bestDistance) { bestDistance = d; best = v; }
     });
+    if (best && typeof maxKm === 'number' && bestDistance > maxKm) return null;
     return best;
   };
 
@@ -190,6 +201,17 @@
     </div>`;
   };
 
+  /** Hint banner shown above the map while the Create Party flow is waiting for a spot click. */
+  const showMapPickBanner = () => {
+    const banner = el('map-pick-banner');
+    if (banner) banner.hidden = false;
+  };
+
+  const hideMapPickBanner = () => {
+    const banner = el('map-pick-banner');
+    if (banner) banner.hidden = true;
+  };
+
   const notifItemHtml = (n) => {
     if (n.kind === 'invite') {
       const inv = n.invite;
@@ -247,6 +269,24 @@
     const drawer = el('venue-drawer');
     drawer.classList.remove('open');
     drawer.setAttribute('aria-hidden', 'true');
+    state.openDrawerVenueId = null;
+  };
+
+  /** True while the right-hand venue drawer is on screen. */
+  const drawerIsOpen = () => {
+    const drawer = el('venue-drawer');
+    return Boolean(drawer && drawer.classList.contains('open'));
+  };
+
+  /** Reloads the open venue drawer in place so a slot created elsewhere shows up immediately. */
+  const refreshOpenDrawer = async () => {
+    const venueId = state.openDrawerVenueId;
+    if (!venueId || !drawerIsOpen()) return;
+    try {
+      renderVenueDrawer(await window.CrewApi.venueSlots(venueId));
+    } catch (e) {
+      /* keep the current drawer contents if the background refresh blips */
+    }
   };
 
   /* ---------------- identity (per-tab, zero login) ---------------- */
@@ -257,12 +297,21 @@
 
     const session = await window.CrewApi.sessionInit(storedId, null);
     state.identity = session;
+    syncPro();
     try {
       window.sessionStorage.setItem(SESSION_ID_KEY, session.guestId);
       window.sessionStorage.setItem('crewparty.guestName', session.displayName || '');
     } catch (e) { /* sessionStorage may be unavailable */ }
     applyProfileDefaults();
     renderIdentity();
+  };
+
+  /** The server session is the source of truth for Pro; localStorage is only the pre-session fallback. */
+  const syncPro = () => {
+    const next = Boolean(state.identity && state.identity.pro);
+    if (next === state.pro) return;
+    state.pro = next;
+    try { window.localStorage.setItem(PRO_KEY, String(next)); } catch (e) { /* storage may be unavailable */ }
   };
 
   const applyProfileDefaults = () => {
@@ -279,8 +328,12 @@
     if (!s) return;
     const age = String(s.ageRole || '').split('\u2022')[0].trim();
     el('identity-avatar').textContent = initials(s.displayName);
-    el('identity-name').textContent = `${s.displayName}${age ? ` (${age})` : ''}`;
-    el('identity-sub').textContent = [s.neighborhood, s.city, s.format, s.pace]
+    const name = `${escapeHtml(s.displayName)}${age ? ` (${escapeHtml(age)})` : ''}`;
+    el('identity-name').innerHTML = state.pro
+      ? `${name} <span class="badge badge-pro" title="CrewParty Pro member">PRO</span>`
+      : name;
+    const plan = state.pro ? 'Pro' : `Free \u2022 ${hostedActiveCount()}/1 active party`;
+    el('identity-sub').textContent = [plan, s.neighborhood, s.city, s.format, s.pace]
       .filter(Boolean).join(' \u2022 ');
   };
 
@@ -291,19 +344,62 @@
     window.setInterval(pollPresence, PRESENCE_MS);
   };
 
-  const pollPresence = async () => {
+  const pollPresence = async (options) => {
+    const opts = options || {};
     if (!state.identity) return;
     try {
       const presence = await window.CrewApi.presence(myId());
       state.presence = presence;
       if (presence.currentGuest) {
         state.identity = { ...state.identity, ...presence.currentGuest };
+        syncPro();
+        applyProState();
         renderIdentity();
       }
       handleNotifications(presence);
       renderPresence();
+      if (opts.adopt) {
+        // This poll follows one of our own mutations, so the new revision is already rendered.
+        if (presence.stateRevision !== undefined && presence.stateRevision !== null) {
+          state.lastRevision = presence.stateRevision;
+        }
+      } else {
+        syncSharedState(presence.stateRevision);
+      }
     } catch (e) {
       /* keep polling silently so a blip never spams the UI */
+    }
+  };
+
+  /**
+   * The server bumps its shared-data revision whenever anybody creates a slot, drops a pin or joins
+   * a party. When the number moves past the one we last rendered, another tab (or another user) has
+   * changed the map, so we quietly refetch everything and redraw the pins without moving the camera.
+   */
+  const syncSharedState = (revision) => {
+    if (revision === undefined || revision === null) return;
+    if (state.lastRevision === null) {
+      state.lastRevision = revision;           // first poll just establishes the baseline
+      return;
+    }
+    if (revision === state.lastRevision) return;
+    state.lastRevision = revision;
+    refreshLiveViews();
+  };
+
+  /** Background refresh used by the live sync: never steals focus and never resets the map view. */
+  let liveRefreshInFlight = false;
+  const refreshLiveViews = async () => {
+    if (liveRefreshInFlight) return;
+    liveRefreshInFlight = true;
+    try {
+      await reloadAll();
+      await doSearch({ silent: true, background: true, preserveView: true });
+      await refreshOpenDrawer();
+    } catch (e) {
+      /* a failed background refresh must never disrupt the user */
+    } finally {
+      liveRefreshInFlight = false;
     }
   };
 
@@ -376,7 +472,9 @@
     await reloadAll();
     await doSearch({ silent: true });
     await loadRadar();
-    await pollPresence();
+    // The mutation we just made bumped the server revision; adopt it instead of treating our own
+    // change as somebody else's and firing a redundant background refresh.
+    await pollPresence({ adopt: true });
     renderAll();
     if (message) showToast(message, 'success');
   };
@@ -399,7 +497,9 @@
       inside > 0 ? `<span class="badge badge-friends">${inside} friend${inside === 1 ? '' : 's'} inside</span>` : '',
       venue && venue.publicSafeSpot ? '<span class="badge badge-safe">Public Safe Spot</span>' : '',
       venue && venue.featuredPartner ? '<span class="badge badge-featured">Featured Partner</span>' : '',
-      (p.trustBadges || []).map((b) => `<span class="badge badge-trust">${escapeHtml(b)}</span>`).join('')
+      (p.trustBadges || []).includes('Pro Host') ? '<span class="badge badge-pro">Pro Host</span>' : '',
+      (p.trustBadges || []).filter((b) => b !== 'Pro Host')
+        .map((b) => `<span class="badge badge-trust">${escapeHtml(b)}</span>`).join('')
     ].filter(Boolean).join('');
   };
 
@@ -458,6 +558,55 @@
     host.innerHTML = parties.length
       ? parties.map(partyCard).join('')
       : emptyState('No open parties match your filters', 'Loosen the budget window or hit Reset filters to see every crew in town.');
+  };
+
+  /* ---------------- rendering: my open slots ---------------- */
+
+  const mySlotCard = (p) => {
+    const members = p.memberGuestIds || [];
+    const isHost = members[0] === myId();
+    const queue = (p.queueGuestNames || []).length;
+    const distance = num(p.distanceKm, 0);
+    const openSlots = Math.max(0, num(p.totalSlots, 0) - num(p.filledSlots, 0));
+    const place = [p.venueName, p.neighborhood].filter(Boolean).join(' \u2022 ');
+
+    return `<article class="card party-card my-slot-card" data-party-id="${attr(p.id)}">
+      <div class="card-head">
+        <h3 class="card-title">${escapeHtml(p.title)}</h3>
+        <span class="badge ${isHost ? 'badge-pro' : 'badge-slot'}">${isHost ? 'You are Host' : 'Joined'}</span>
+      </div>
+      <div class="meta-row">
+        <span>${escapeHtml(p.city)}${place ? ` \u2022 ${escapeHtml(place)}` : ''}</span>
+        <span class="dot">\u2022</span>
+        <span>${escapeHtml(p.timeLabel)}</span>
+      </div>
+      <div class="meta-row">
+        <span>${escapeHtml(p.filledSlots)}/${escapeHtml(p.totalSlots)} joined</span>
+        <span class="dot">\u2022</span>
+        <span>${openSlots} open</span>
+        <span class="dot">\u2022</span>
+        <span>${queue} in queue</span>
+        ${distance > 0 ? `<span class="dot">\u2022</span><span>${distance} km away</span>` : ''}
+      </div>
+      <div class="party-flags">${partyFlags(p)}</div>
+      <div class="venue-line">Spot: <strong>${escapeHtml(p.venueName || 'TBD')}</strong></div>
+      <div class="card-actions">
+        <button class="btn btn-accent" data-action="invite-friend-slot" data-party-id="${attr(p.id)}">Invite Friend</button>
+        <button class="btn btn-primary" data-action="complete-party" data-party-id="${attr(p.id)}">Complete &amp; Rate</button>
+        <button class="btn btn-ghost" data-action="leave-slot" data-party-id="${attr(p.id)}">Cancel / Leave Slot</button>
+      </div>
+    </article>`;
+  };
+
+  const renderMySlots = () => {
+    const host = el('my-slots-list');
+    if (!host) return;
+    const slots = mySlots();
+    const badge = el('my-slots-count');
+    if (badge) badge.textContent = String(slots.length);
+    host.innerHTML = slots.length
+      ? slots.map(mySlotCard).join('')
+      : emptyState('You are not in any slots yet', 'Create a party or join one below and your seats, open spots and invites show up here.');
   };
 
   /* ---------------- rendering: players (demo crowd) ---------------- */
@@ -704,6 +853,38 @@
 
   /* ---------------- rendering: venues ---------------- */
 
+  /** Guesses the crew theme a venue's own tags point at. */
+  const bestFitTheme = (v) => {
+    const tags = (v.tags || []).map((t) => String(t).toLowerCase());
+    const has = (word) => tags.some((t) => t.includes(word));
+    if (has('wifi') || has('quiet') || has('table')) return 'Coworking & Chill';
+    if (has('craft') || has('late') || has('drink')) return 'Trivia & Social';
+    return 'Board Games';
+  };
+
+  /** Pro-only venue intel: best-fit theme, live slot demand and a budget tip. */
+  const venueInsights = (v) => {
+    const slots = num(v.activeSlotCount, 0);
+    const demand = slots >= 3 ? 'High' : slots >= 1 ? 'Steady' : 'Quiet';
+    const cost = num(v.avgCostUsd, 0);
+    const tip = cost <= 20 ? 'Budget pick \u2014 perfect for a first hangout.'
+      : cost <= 40 ? 'Mid-range \u2014 split the bill and keep it easy.'
+      : 'Splurge spot \u2014 save it for a special crew night.';
+    const rows = [
+      ['Best-fit theme', bestFitTheme(v)],
+      ['Slot demand', `${demand} \u2014 ${count(slots, 'active slot')}`],
+      ['Budget tip', tip]
+    ];
+    const list = (extraClass) => `<ul class="vi-list${extraClass}">${rows.map(([label, text]) =>
+      `<li><span>${escapeHtml(label)}</span><strong>${escapeHtml(text)}</strong></li>`).join('')}</ul>`;
+    return `<div class="venue-insights">
+      <div class="vi-head">Venue Insights</div>
+      ${state.pro ? list('')
+        : `<div class="vi-locked">${list(' vi-blur')}
+          <button class="btn btn-primary btn-sm vi-unlock" data-action="open-paywall">Unlock Venue Insights with Pro</button></div>`}
+    </div>`;
+  };
+
   const venueCard = (v) => {
     const rating = typeof v.avgRating === 'number' ? v.avgRating.toFixed(1) : '\u2014';
     const ratingCount = num(v.ratingCount, 0);
@@ -728,8 +909,10 @@
         ${v.demoPool ? '<span class="badge badge-demo">Demo Pool</span>' : ''}
       </div>
       <div class="chips">${chips(v.tags)}</div>
+      ${venueInsights(v)}
       <div class="card-actions">
         <button class="btn btn-primary btn-sm" data-action="open-venue" data-venue-id="${attr(v.id)}">View Live Slots</button>
+        <button class="btn btn-ghost btn-sm" data-action="create-at-venue" data-venue-id="${attr(v.id)}" data-venue-city="${attr(v.city || '')}" data-venue-neighborhood="${attr(v.neighborhood || '')}">+ Create Slot</button>
       </div>
     </article>`;
   };
@@ -787,7 +970,9 @@
 
   /* ---------------- rendering: orchestrator ---------------- */
 
-  const renderAll = () => {
+  const renderAll = (options) => {
+    const opts = options || {};
+    renderMySlots();
     renderParties();
     renderPlayers();
     renderVenueMini();
@@ -796,7 +981,12 @@
     renderRadar();
     renderPresence();
     applyProState();
-    if (window.CrewMap) window.CrewMap.renderVenues(state.results.venues.length ? state.results.venues : state.venues);
+    if (window.CrewMap) {
+      window.CrewMap.renderVenues(
+        state.results.venues.length ? state.results.venues : state.venues,
+        allOpenParties(),
+        { preserveView: Boolean(opts.preserveView) });
+    }
   };
 
   const applyProState = () => {
@@ -885,13 +1075,13 @@
         players: res.players || [],
         venues: res.venues || []
       };
-      renderAll();
+      renderAll({ preserveView: Boolean(opts.preserveView) });
       if (!opts.silent) {
         showToast(`Found ${count(state.results.parties.length, 'open party').replace('party s', 'parties')} and ${count(state.results.venues.length, 'venue')} in ${state.filters.city}.`, 'success');
       }
     } catch (err) {
-      renderAll();
-      showToast('Search failed: ' + err.message, 'error');
+      renderAll({ preserveView: Boolean(opts.preserveView) });
+      if (!opts.background) showToast('Search failed: ' + err.message, 'error');
     }
   };
 
@@ -950,6 +1140,7 @@
   };
 
   const openVenueDrawer = async (venueId) => {
+    state.openDrawerVenueId = venueId;
     openDrawer();
     el('drawer-title').textContent = 'Venue';
     el('drawer-sub').textContent = '';
@@ -973,18 +1164,104 @@
       ${v.demoPool ? '<span class="badge badge-demo">Demo Pool</span>' : ''}
     </div>`;
     const slots = res.slots || [];
-    el('drawer-body').innerHTML = flags + (slots.length
-      ? slots.map(slotCard).join('')
-      : emptyState('No open slots at this venue yet', 'Be the first to start a party here and your crew will see it instantly.'));
+    const createHere = v.id
+      ? `<button class="btn btn-primary btn-block" data-action="create-at-venue" data-venue-id="${attr(v.id)}" data-venue-city="${attr(v.city || '')}" data-venue-neighborhood="${attr(v.neighborhood || '')}">+ Create Slot Here</button>`
+      : '';
+    el('drawer-body').innerHTML = createHere
+      + flags
+      + venueInsights({ ...v, activeSlotCount: res.activeSlotCount })
+      + (slots.length
+        ? slots.map(slotCard).join('')
+        : emptyState('No open slots at this venue yet', 'Be the first to start a party here and your crew will see it instantly.'));
+  };
+
+  /* ---------------- custom-spot pins on the map ---------------- */
+
+  /** The party drawer's Join / Queue / Leave / Check-In actions, depending on my membership. */
+  const partyDrawerActions = (p) => {
+    const full = p.filledSlots >= p.totalSlots;
+    const joined = isJoined(p);
+    const checkedIn = (p.checkedInGuestIds || []).includes(myId());
+    const buttons = [];
+    if (joined) {
+      buttons.push(`<button class="btn btn-ghost btn-sm" data-action="leave-slot" data-party-id="${attr(p.id)}">Leave Slot</button>`);
+      if (!checkedIn) {
+        buttons.push(`<button class="btn btn-accent btn-sm" data-action="checkin-party" data-party-id="${attr(p.id)}">Safety Check-In</button>`);
+      }
+    } else if (full) {
+      buttons.push(`<button class="btn btn-accent btn-sm" data-action="queue-party" data-party-id="${attr(p.id)}">Join Waitlist Queue</button>`);
+    } else {
+      buttons.push(`<button class="btn btn-primary btn-sm" data-action="join-party" data-party-id="${attr(p.id)}">Join Slot</button>`);
+    }
+    if (p.venueId) {
+      buttons.push(`<button class="btn btn-ghost btn-sm" data-action="open-venue" data-venue-id="${attr(p.venueId)}">View Live Slots</button>`);
+    }
+    return `<div class="card-actions drawer-actions">${buttons.join('')}</div>`;
+  };
+
+  /** Full party details in the right drawer: theme, time, budget, members, Fit Score and icebreakers. */
+  const partyDrawerBody = (p) => {
+    const fit = clamp(num(p.fitScore, 0), 0, 100);
+    const distance = num(p.distanceKm, 0);
+    const members = (p.memberNames && p.memberNames.length ? p.memberNames : p.members || [])
+      .map((m) => `<span class="chip">${escapeHtml(m)}</span>`).join('');
+    const icebreakers = (p.icebreakers || []).map((i) => `<li>${escapeHtml(i)}</li>`).join('');
+    return `<div class="slot-card">
+        <div class="meta-row">
+          <span class="badge badge-theme">${escapeHtml(p.theme || '')}</span>
+          <span>${escapeHtml(p.timeLabel || '')}</span>
+        </div>
+        <div class="slot-meta">
+          <span>$${escapeHtml(p.budgetMin)}-$${escapeHtml(p.budgetMax)} pp</span>
+          <span>${escapeHtml(p.filledSlots)}/${escapeHtml(p.totalSlots)} players</span>
+          ${distance > 0 ? `<span>${distance} km away</span>` : ''}
+        </div>
+        <div class="venue-line">Venue: <strong>${escapeHtml(p.venueName || 'Custom Spot')}</strong></div>
+        <div class="party-flags">${partyFlags(p)}</div>
+      </div>
+      <div class="fit">
+        <div class="fit-label"><span>Match Fit Score</span><strong>${fit}%</strong></div>
+        <div class="fit-bar"><span style="width:${fit}%"></span></div>
+      </div>
+      <div class="chips">${members}</div>
+      ${icebreakers ? `<div class="icebreakers"><div class="icebreakers-label">AI Icebreakers</div><ul>${icebreakers}</ul></div>` : ''}
+      ${partyDrawerActions(p)}`;
+  };
+
+  /**
+   * Opens the right drawer with a party's full details and a live Join Slot action. Used by the map
+   * pins of open parties and custom spots, so a tap lets the user join straight from the map.
+   */
+  const openPartyDrawer = (partyId) => {
+    const party = findParty(partyId);
+    if (!party) {
+      showToast('That slot is no longer open.', 'info');
+      return;
+    }
+    // No venue id: a background venue refresh must not overwrite the party contents.
+    state.openDrawerVenueId = null;
+    openDrawer();
+    el('drawer-title').textContent = party.title || 'Open Party';
+    el('drawer-sub').innerHTML = `${escapeHtml(party.theme || '')} \u2022 ${escapeHtml(party.timeLabel || '')} \u2022 ${escapeHtml(party.venueName || party.city || '')}`;
+    el('drawer-body').innerHTML = partyDrawerBody(party);
+  };
+
+  /**
+   * Click on a custom-spot pin (a slot created by another user straight on the map). Opens the party
+   * drawer so the details and the Join Slot button are one tap away.
+   */
+  const focusParty = (partyId) => {
+    openPartyDrawer(partyId);
   };
 
   /* ---------------- create party ---------------- */
 
   const venueOptionsHtml = (city) => {
+    const empty = '<option value="">\u2014 Map spot / Custom location \u2014</option>';
     const venues = city && city !== 'All Cities' ? state.venues.filter((v) => v.city === city) : state.venues;
     const list = venues.length ? venues : state.venues;
-    if (!list.length) return '<option value="">No venues available</option>';
-    return list.map((v) =>
+    if (!list.length) return empty;
+    return empty + list.map((v) =>
       `<option value="${attr(v.id)}">${escapeHtml(v.name)} \u2014 ${escapeHtml(v.neighborhood)} ($${escapeHtml(v.avgCostUsd)})</option>`).join('');
   };
 
@@ -999,29 +1276,57 @@
   };
 
   const applyCityOptions = () => {
+    const cities = [];
+    const remember = (city) => {
+      if (city && city !== 'All Cities' && !cities.includes(city)) cities.push(city);
+    };
+
+    ['create-city', 'venue-city-filter'].forEach((id) => {
+      const select = el(id);
+      if (!select) return;
+      // Whatever is already in the dropdown (e.g. a GPS-detected "Астана") stays available, so
+      // opening the Create Party modal never wipes the city the user is browsing.
+      [...select.options].forEach((option) => remember(option.value));
+    });
+    CITIES.forEach(remember);
+    remember(state.filters.city);
+    remember(state.identity && state.identity.city);
+    remember(state.selectedSpot && state.selectedSpot.city);
+
     ['create-city', 'venue-city-filter'].forEach((id) => {
       const select = el(id);
       if (!select) return;
       const current = select.value;
-      const extras = [...CITIES];
-      if (state.identity && state.identity.city && !extras.includes(state.identity.city)) extras.push(state.identity.city);
-      select.innerHTML = (id === 'venue-city-filter' ? ['All Cities', ...extras] : extras)
-        .map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
-      if ([...select.options].some((o) => o.value === current)) select.value = current;
+      const list = id === 'venue-city-filter' ? ['All Cities', ...cities] : cities;
+      select.innerHTML = list
+        .map((city) => `<option value="${escapeHtml(city)}">${escapeHtml(city)}</option>`).join('');
+      if (list.includes(current)) select.value = current;
     });
   };
 
   const openCreateModal = (options) => {
     const opts = options || {};
+    // Opening the form fresh cancels any pending "pick a spot on the map" arming.
+    state.pickingMapSpot = false;
+    hideMapPickBanner();
     el('create-theme').innerHTML = THEMES.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
     applyCityOptions();
 
     const city = opts.city || (state.filters.city !== 'All Cities' ? state.filters.city : CITIES[0]);
+    ensureCityOption('create-city', city);
     el('create-city').value = city;
     fillVenueSelect(city);
 
     const venueId = opts.venueId || (el('create-venue').options[0] ? el('create-venue').options[0].value : '');
     el('create-venue').value = venueId;
+    if (venueId && el('create-venue').value !== venueId) {
+      // A venue opened straight from its drawer may not be in the current city list yet: add it so
+      // the pre-filled selection survives and the created slot points at the right place.
+      const known = findVenue(venueId);
+      el('create-venue').insertAdjacentHTML('beforeend',
+        `<option value="${attr(venueId)}">${escapeHtml(known ? known.name : 'Selected venue')}</option>`);
+      el('create-venue').value = venueId;
+    }
     const venue = findVenue(venueId);
 
     el('create-title').value = opts.title || '';
@@ -1036,8 +1341,10 @@
     el('create-minigroup').checked = !!opts.miniGroupPriority;
     el('create-buddies').innerHTML = buddyOptionsHtml(opts.buddyIds || []);
     el('create-midpoint').checked = !!opts.midpointMode;
-    el('create-spot-name').value = opts.spotName || '';
-    state.selectedSpot = null;
+    const spot = opts.spot || null;
+    el('create-spot-name').value = opts.spotName || (spot ? spot.name || '' : '');
+    state.selectedSpot = spot;
+    state.spotNameDirty = false;
     toggleMidpointFields();
 
     openModal('create-modal');
@@ -1066,11 +1373,13 @@
     if (max < min) { const swap = min; min = max; max = swap; }
 
     const midpointMode = el('create-midpoint').checked;
+    const spot = midpointMode ? null : state.selectedSpot;
     let venueId = val('create-venue');
 
-    if (!midpointMode && !venueId && state.selectedSpot) {
-      const venue = nearestVenue(state.selectedSpot.lat, state.selectedSpot.lng);
-      if (venue) { venueId = venue.id; el('create-venue').value = venue.id; }
+    // A map click only snaps to a CrewParty venue that sits within 50 m — otherwise it stays a custom spot.
+    if (!midpointMode && !venueId && spot && typeof spot.lat === 'number') {
+      const venue = nearestVenue(spot.lat, spot.lng, 0.05);
+      if (venue) venueId = venue.id;
     }
 
     const payload = {
@@ -1083,6 +1392,11 @@
       budgetMax: max,
       timeLabel: String(val('create-time') || '').trim(),
       venueId: midpointMode ? '' : venueId,
+      spotName: spot ? String(spot.name || '').trim() : '',
+      spotCategory: spot ? String(spot.category || '').trim() : '',
+      spotLat: spot && typeof spot.lat === 'number' ? spot.lat : null,
+      spotLng: spot && typeof spot.lng === 'number' ? spot.lng : null,
+      isListedPlace: !!(spot && spot.isListedPlace),
       buddyIds: checkedBuddyIds(),
       guestId: myId(),
       midpointMode,
@@ -1094,8 +1408,11 @@
     if (!payload.title) { showToast('Please give your party a title.', 'error'); return; }
     if (!payload.timeLabel) payload.timeLabel = 'This weekend';
     if (!payload.neighborhood) payload.neighborhood = payload.city;
-    if (!midpointMode && !payload.venueId) {
-      showToast('Pick a venue, or switch on Fair-Midpoint mode to let CrewParty choose one.', 'error');
+    // Without Fair-Midpoint a location is mandatory: either a venue, or a spot picked on the map.
+    const hasSpot = Boolean(state.selectedSpot
+      && (typeof state.selectedSpot.lat === 'number' || String(state.selectedSpot.name || '').trim()));
+    if (!midpointMode && !payload.venueId && !hasSpot && !payload.spotName) {
+      showToast('Select a venue, pick a spot on the map, or enable Fair-Midpoint mode', 'error');
       return;
     }
 
@@ -1115,10 +1432,20 @@
         }
       }, 140);
     } catch (err) {
-      showToast('Could not create party: ' + err.message, 'error');
+      if (!handleLimitError(err)) showToast('Could not create party: ' + err.message, 'error');
     } finally {
       if (submitBtn) submitBtn.disabled = false;
     }
+  };
+
+  /** Opens Create Party pre-filled with a venue, closing the drawer that hosted the button. */
+  const startPartyAtVenue = (node) => {
+    closeDrawer();
+    openCreateModal({
+      venueId: node.dataset.venueId,
+      city: node.dataset.venueCity,
+      neighborhood: node.dataset.venueNeighborhood
+    });
   };
 
   const startPartyWithFriends = () => {
@@ -1152,26 +1479,121 @@
 
   /* ---------------- map spot picking ---------------- */
 
+  /** Normalizes a picked spot into the shape the Create Party form and the API expect. */
+  const normalizeSpot = (spot) => ({
+    lat: typeof spot.lat === 'number' ? spot.lat : null,
+    lng: typeof spot.lng === 'number' ? spot.lng : null,
+    name: spot.name || '',
+    category: spot.category || '',
+    city: spot.city || '',
+    neighborhood: spot.neighborhood || '',
+    postcode: spot.postcode || '',
+    isListedPlace: !!spot.isListedPlace
+  });
+
+  /** Parks the Create Party form values while the user temporarily leaves the modal to pick a spot. */
+  const captureCreateDraft = () => ({
+    title: val('create-title'),
+    theme: val('create-theme'),
+    city: val('create-city'),
+    neighborhood: val('create-neighborhood'),
+    totalSlots: num(val('create-slots'), 4),
+    budgetMin: num(val('create-budget-min'), 10),
+    budgetMax: num(val('create-budget-max'), 30),
+    timeLabel: val('create-time'),
+    format: val('create-format'),
+    pace: val('create-pace'),
+    miniGroupPriority: el('create-minigroup').checked,
+    buddyIds: checkedBuddyIds(),
+    midpointMode: el('create-midpoint').checked
+  });
+
+  /**
+   * Leaves the Create Party modal, parks the typed values and arms the map: the next click anywhere
+   * on the map reopens the modal with those values plus the chosen coordinates, name, city and ZIP.
+   */
+  const pickSpotOnMap = () => {
+    state.createDraft = captureCreateDraft();
+    state.pickingMapSpot = true;
+    closeAllModals();
+    const panel = document.querySelector('.map-panel');
+    if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    showMapPickBanner();
+    showToast('Click anywhere on the map to set the party spot.', 'info');
+  };
+
   const handleSpotPick = (spot) => {
-    state.selectedSpot = spot;
-    if (!el('create-modal').classList.contains('open')) openCreateModal({});
+    const selected = normalizeSpot(spot);
+    const fromPickFlow = state.pickingMapSpot;
+    state.pickingMapSpot = false;
+    hideMapPickBanner();
+    // Coming back from "Pick Spot on Map": restore the parked form values together with the new spot.
+    if (fromPickFlow) {
+      openCreateModal({ ...(state.createDraft || {}), spot: selected, spotName: selected.name });
+      state.createDraft = null;
+    } else if (!el('create-modal').classList.contains('open')) {
+      // Open the modal first: openCreateModal installs the spot, so nothing wipes it afterwards.
+      openCreateModal({ spot: selected });
+    } else {
+      state.selectedSpot = selected;
+    }
+    state.spotNameDirty = false;
     el('create-midpoint').checked = false;
     toggleMidpointFields();
+    el('create-venue').value = '';
     const input = el('create-spot-name');
-    if (input) { input.value = spot.name || ''; input.focus(); }
-    showToast('Spot dropped on the map. Name it and create your party.', 'info');
+    if (input) { input.value = selected.name; if (!fromPickFlow) input.focus(); }
+    showToast(selected.isListedPlace
+      ? `Real spot selected: ${selected.name}. Set the details and start your party.`
+      : 'Spot dropped on the map. Name it and create your party.', 'info');
   };
 
   const handleSpotResolved = (spot) => {
-    state.selectedSpot = spot;
-    const input = el('create-spot-name');
-    if (input && !input.value) input.value = spot.name || '';
-    if (spot.name) showToast(`Found: ${spot.name}.`, 'info');
-    else showToast('No named venue here \u2014 type a Custom Spot Name and we will match the closest public safe venue.', 'info');
-    if (!el('create-midpoint').checked) {
-      const venue = nearestVenue(spot.lat, spot.lng);
-      if (venue) { el('create-venue').value = venue.id; syncVenueDetails(); el('create-venue').value = venue.id; }
+    if (!state.selectedSpot) return; // the picker was superseded by an existing venue meanwhile
+    // A name the user typed by hand always beats a late geocoder answer.
+    const keepTypedName = state.spotNameDirty;
+    state.selectedSpot = {
+      ...state.selectedSpot,
+      lat: spot.lat,
+      lng: spot.lng,
+      name: keepTypedName ? state.selectedSpot.name : (spot.name || state.selectedSpot.name),
+      city: spot.city || state.selectedSpot.city || '',
+      neighborhood: spot.neighborhood || state.selectedSpot.neighborhood || '',
+      postcode: spot.postcode || state.selectedSpot.postcode || '',
+      isListedPlace: keepTypedName ? false : !!spot.isListedPlace
+    };
+
+    // The click already knows the city, district + ZIP, so the form never has to guess them.
+    if (spot.city && ensureCityOption('create-city', spot.city)) {
+      el('create-city').value = spot.city;
+      fillVenueSelect(spot.city);
     }
+    if (spot.neighborhood) el('create-neighborhood').value = spot.neighborhood;
+    if (!keepTypedName && spot.name) el('create-spot-name').value = spot.name;
+
+    if (keepTypedName) return;
+    if (state.selectedSpot.isListedPlace) return; // a real organization is bound on the backend
+    if (spot.name) showToast(`Found: ${spot.name}.`, 'info');
+    else showToast('No named place here \u2014 type a Custom Spot Name for your spot.', 'info');
+  };
+
+  /** Typing a custom name means "not a listed venue": detach any selected venue. */
+  const onSpotNameTyped = (value) => {
+    const name = String(value || '').trim();
+    state.spotNameDirty = true;
+    const select = el('create-venue');
+    if (select && select.value) select.value = '';
+    const base = state.selectedSpot || {};
+    state.selectedSpot = {
+      lat: typeof base.lat === 'number' ? base.lat : null,
+      lng: typeof base.lng === 'number' ? base.lng : null,
+      name,
+      category: base.category || '',
+      city: base.city || '',
+      neighborhood: base.neighborhood || '',
+      postcode: base.postcode || '',
+      isListedPlace: false
+    };
   };
 
   const startFromRadar = (node) => {
@@ -1201,6 +1623,20 @@
     return true;
   };
 
+  /** Reverse geocode GPS coords into a real city name so the backend never falls back to "Your Area". */
+  const reverseGeocodeCity = async (lat, lng) => {
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&lat=${lat}&lon=${lng}`;
+      const response = await fetch(url, { headers: { Accept: 'application/json' } });
+      if (!response.ok) return '';
+      const data = await response.json();
+      const address = data.address || {};
+      return address.city || address.town || address.state || '';
+    } catch (e) {
+      return '';
+    }
+  };
+
   const detectCity = () => {
     if (!navigator.geolocation) {
       showToast('GPS is not available in this browser \u2014 pick a city from the dropdown instead.', 'error');
@@ -1211,13 +1647,32 @@
       const lat = position.coords.latitude;
       const lng = position.coords.longitude;
       try {
-        const res = await window.CrewApi.gpsSeed(lat, lng, '');
+        const cityName = await reverseGeocodeCity(lat, lng);
+        const res = await window.CrewApi.gpsSeed(lat, lng, cityName);
         ensureCityOption('global-city', res.city);
         ensureCityOption('create-city', res.city);
         ensureCityOption('venue-city-filter', res.city);
         ensureCityOption('profile-city', res.city);
-        el('global-city').value = res.city;
+        // One GPS fix syncs every city filter at once so Explore, Rated Venues, Create and Profile all
+        // open on the detected city instead of the demo city the session was seeded with.
         state.filters.city = res.city;
+        el('global-city').value = res.city;
+        state.venueCity = res.city;
+        el('venue-city-filter').value = res.city;
+        el('create-city').value = res.city;
+        el('profile-city').value = res.city;
+        // Persist the live GPS fix on the session so distanceKm to nearby slots is measured from
+        // the real position instead of the demo city the session was seeded with.
+        try {
+          const updated = await window.CrewApi.updateProfile({
+            guestId: myId(),
+            city: res.city || cityName,
+            lat,
+            lng
+          });
+          state.identity = { ...state.identity, ...updated };
+          renderIdentity();
+        } catch (e) { /* seeding still works even if the profile sync fails */ }
         await reloadAll();
         await loadRadar();
         await doSearch({ silent: true });
@@ -1225,6 +1680,7 @@
         if (window.CrewMap) {
           window.CrewMap.init('venue-map');
           window.CrewMap.centerOn(res.centerLat, res.centerLng, 13);
+          window.CrewMap.setUserLocation(lat, lng);
         }
         showToast(`Demo pool ready in ${res.city}: ${count(res.venuesCreated, 'venue')} and ${count(res.partiesCreated, 'open slot')}.`, 'success');
       } catch (err) {
@@ -1235,6 +1691,32 @@
     }, { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 });
   };
 
+  /**
+   * Drops the "You are here" marker on the map. Uses a live GPS fix when the browser already has
+   * permission, and otherwise falls back to the coordinates stored on the session.
+   */
+  const initUserLocation = () => {
+    if (!window.CrewMap || !window.CrewMap.setUserLocation) return;
+    const applySessionCoords = () => {
+      const s = state.identity;
+      if (s && typeof s.lat === 'number' && typeof s.lng === 'number' && (s.lat !== 0 || s.lng !== 0)) {
+        window.CrewMap.setUserLocation(s.lat, s.lng);
+      }
+    };
+    const locate = () => navigator.geolocation.getCurrentPosition(
+      (pos) => window.CrewMap.setUserLocation(pos.coords.latitude, pos.coords.longitude),
+      applySessionCoords,
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 });
+
+    if (navigator.geolocation && navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({ name: 'geolocation' })
+        .then((status) => { if (status.state === 'granted') locate(); else applySessionCoords(); })
+        .catch(applySessionCoords);
+    } else {
+      applySessionCoords();
+    }
+  };
+
   /* ---------------- join / queue / check-in ---------------- */
 
   const joinSlot = async (partyId) => {
@@ -1243,7 +1725,7 @@
       closeDrawer();
       await refreshAfterChange(`You joined "${party.title}". ${Math.max(0, party.totalSlots - party.filledSlots)} slot(s) left.`);
     } catch (err) {
-      showToast('Could not join slot: ' + err.message, 'error');
+      if (!handleLimitError(err)) showToast('Could not join slot: ' + err.message, 'error');
     }
   };
 
@@ -1278,6 +1760,19 @@
     }
   };
 
+  /** Leaves a slot; a host leaving their own empty party closes it on the backend. */
+  const leaveSlot = async (partyId) => {
+    try {
+      const party = await window.CrewApi.leaveParty(partyId, myId());
+      const message = party && party.status === 'COMPLETED'
+        ? `You left "${party.title}" — it was yours and had nobody else in it, so it is now closed.`
+        : `You left "${party.title}".`;
+      await refreshAfterChange(message);
+    } catch (err) {
+      showToast('Could not leave the slot: ' + err.message, 'error');
+    }
+  };
+
   /* ---------------- friends & invites ---------------- */
 
   const addFriend = async (friendId) => {
@@ -1292,7 +1787,7 @@
   const requestFriend = async (guestId) => {
     try {
       const relation = await window.CrewApi.requestFriend(myId(), guestId);
-      await pollPresence();
+      await pollPresence({ adopt: true });
       showToast(`Friend request sent to ${relation.toName}.`, 'success');
     } catch (err) {
       showToast('Could not send friend request: ' + err.message, 'error');
@@ -1304,7 +1799,7 @@
       const relation = await window.CrewApi.acceptFriend(requestId);
       removeBanner(`req:${requestId}`);
       if (state.seenKeys) state.seenKeys.delete(`req:${requestId}`);
-      await pollPresence();
+      await pollPresence({ adopt: true });
       showToast(`${relation.fromName} is now in your crew.`, 'success');
     } catch (err) {
       showToast('Could not accept friend request: ' + err.message, 'error');
@@ -1329,7 +1824,7 @@
       if (state.seenKeys) state.seenKeys.delete(`invite:${inviteId}`);
       await refreshAfterChange(`You joined "${invite.partyTitle}" from the invitation.`);
     } catch (err) {
-      showToast('Could not accept the invitation: ' + err.message, 'error');
+      if (!handleLimitError(err)) showToast('Could not accept the invitation: ' + err.message, 'error');
     }
   };
 
@@ -1337,7 +1832,7 @@
     try {
       await window.CrewApi.respondInvite(inviteId, 'DECLINE');
       removeBanner(`invite:${inviteId}`);
-      await pollPresence();
+      await pollPresence({ adopt: true });
       showToast('Invitation declined.', 'info');
     } catch (err) {
       showToast('Could not decline the invitation: ' + err.message, 'error');
@@ -1383,6 +1878,44 @@
     try {
       await window.CrewApi.createInvite(myId(), friendId, slotId);
       const guest = findGuestById(friendId);
+      showToast(`Invitation sent to ${guest ? guest.displayName : 'your friend'}.`, 'success');
+    } catch (err) {
+      showToast('Could not send the invite: ' + err.message, 'error');
+    }
+  };
+
+  /** "Invite Friend" straight from a My Open Slots card: pick one of my crew for this slot. */
+  const inviteFriendToSlot = (partyId) => {
+    const party = findParty(partyId);
+    if (!party) { showToast('That slot is no longer open.', 'error'); return; }
+    const relations = state.presence.acceptedFriends || [];
+    if (!relations.length) {
+      showToast('Add someone to your crew first, then invite them into this slot.', 'error');
+      return;
+    }
+    state.chooser = { mode: 'invite-friend', partyId };
+    el('chooser-title').textContent = `Invite a friend to "${party.title}"`;
+    el('chooser-list').innerHTML = relations.map((r) => {
+      const name = r.fromGuestId === myId() ? r.toName : r.fromName;
+      const id = r.fromGuestId === myId() ? r.toGuestId : r.fromGuestId;
+      return `<div class="chooser-item">
+        <div class="ci-main">
+          <div class="ci-title">${escapeHtml(name)}</div>
+          <div class="ci-sub">In your crew</div>
+        </div>
+        <button class="btn btn-primary btn-sm" data-action="choose-friend" data-guest-id="${attr(id)}">Invite</button>
+      </div>`;
+    }).join('');
+    openModal('chooser-modal');
+  };
+
+  const chooseFriend = async (guestId) => {
+    if (!state.chooser || state.chooser.mode !== 'invite-friend') return;
+    const partyId = state.chooser.partyId;
+    try {
+      await window.CrewApi.createInvite(myId(), guestId, partyId);
+      closeAllModals();
+      const guest = findGuestById(guestId);
       showToast(`Invitation sent to ${guest ? guest.displayName : 'your friend'}.`, 'success');
     } catch (err) {
       showToast('Could not send the invite: ' + err.message, 'error');
@@ -1491,7 +2024,18 @@
 
   /* ---------------- paywall ---------------- */
 
+  /** Recognises a backend Free-tier limit message and, instead of a plain error, opens the paywall. */
+  const handleLimitError = (err) => {
+    const message = String((err && err.message) || '');
+    if (!/Free plan limit|CrewParty Pro feature|Pro for unlimited/i.test(message)) return false;
+    showToast(`${message} Opening CrewParty Pro\u2026`, 'info');
+    openPaywall();
+    return true;
+  };
+
   const openPaywall = () => {
+    // The venue drawer sits below the modal anyway; closing it avoids a stale panel behind the checkout.
+    closeDrawer();
     if (state.pro) {
       el('paywall-form').hidden = true;
       el('paywall-success').hidden = false;
@@ -1505,10 +2049,13 @@
   const startPro = (button) => {
     button.disabled = true;
     button.textContent = 'Processing\u2026';
-    window.CrewApi.checkout().then((res) => {
+    window.CrewApi.checkout(myId()).then((res) => {
       state.pro = true;
+      if (state.identity) state.identity.pro = true;
       try { window.localStorage.setItem(PRO_KEY, 'true'); } catch (e) { /* storage may be unavailable */ }
       applyProState();
+      renderIdentity();
+      renderVenues();
       el('paywall-form').hidden = true;
       el('paywall-success').hidden = false;
       showToast(`${(res && res.plan) || 'CrewParty Pro'} unlocked${res && res.amountUsd ? ` for $${res.amountUsd}/mo` : ''}. Welcome aboard!`, 'success');
@@ -1533,16 +2080,21 @@
     'search': () => doSearch(),
     'reset-filters': () => resetFilters(),
     'open-create': () => openCreateModal({}),
+    'pick-spot-on-map': () => pickSpotOnMap(),
     'gps-detect': () => detectCity(),
     'pick-format': (node) => { state.filters.format = node.dataset.format; setActivePill(el('format-pills'), node); },
     'pick-pace': (node) => { state.filters.pace = node.dataset.pace; setActivePill(el('pace-pills'), node); },
     'close-drawer': () => closeDrawer(),
     'start-party-with-friends': () => startPartyWithFriends(),
     'open-venue': (node) => openVenueDrawer(node.dataset.venueId),
+    'create-at-venue': (node) => startPartyAtVenue(node),
     'join-party': (node) => joinSlot(node.dataset.partyId),
     'queue-party': (node) => joinQueue(node.dataset.partyId),
     'checkin-party': (node) => checkIn(node.dataset.partyId),
     'complete-party': (node) => completeParty(node.dataset.partyId),
+    'leave-slot': (node) => leaveSlot(node.dataset.partyId),
+    'invite-friend-slot': (node) => inviteFriendToSlot(node.dataset.partyId),
+    'choose-friend': (node) => chooseFriend(node.dataset.guestId),
     'add-friend': (node) => addFriend(node.dataset.friendId),
     'request-friend': (node) => requestFriend(node.dataset.guestId),
     'accept-friend': (node) => acceptFriend(node.dataset.requestId),
@@ -1560,10 +2112,36 @@
   };
 
   const CHANGE_ACTIONS = {
-    'city-change': () => { readFilters(); loadRadar(); doSearch(); },
+    'city-change': () => {
+      readFilters();
+      // Keep the Rated Venues tab on the same town: changing the global city moves its filter too.
+      const city = state.filters.city;
+      if (city && city !== 'All Cities') ensureCityOption('venue-city-filter', city);
+      el('venue-city-filter').value = city;
+      state.venueCity = city;
+      loadRadar();
+      doSearch();
+      renderVenues();
+    },
     'create-city': () => { fillVenueSelect(val('create-city')); },
-    'create-venue': () => syncVenueDetails(),
-    'toggle-midpoint': () => toggleMidpointFields(),
+    'create-venue': () => {
+      syncVenueDetails();
+      // Choosing a real venue detaches any map spot / custom name.
+      if (val('create-venue')) {
+        const input = el('create-spot-name');
+        if (input) input.value = '';
+        state.selectedSpot = null;
+        state.spotNameDirty = false;
+      }
+    },
+    'toggle-midpoint': () => {
+      if (el('create-midpoint').checked && !state.pro) {
+        el('create-midpoint').checked = false;
+        showToast('Fair-Midpoint auto-matching is a CrewParty Pro feature. Opening Pro\u2026', 'info');
+        openPaywall();
+      }
+      toggleMidpointFields();
+    },
     'venue-sort': () => { state.venueSort = val('venue-sort'); renderVenues(); },
     'venue-city-filter': () => { state.venueCity = val('venue-city-filter'); renderVenues(); }
   };
@@ -1594,6 +2172,7 @@
   const handleInput = (event) => {
     const id = event.target.id;
     if (id === 'budget-min' || id === 'budget-max') syncBudget();
+    if (id === 'create-spot-name') onSpotNameTyped(event.target.value);
   };
 
   const handleSubmit = (event) => {
@@ -1624,7 +2203,8 @@
       window.CrewMap.setHandlers({
         onVenueSelect: (venueId) => openVenueDrawer(venueId),
         onSpotPick: (spot) => handleSpotPick(spot),
-        onSpotResolved: (spot) => handleSpotResolved(spot)
+        onSpotResolved: (spot) => handleSpotResolved(spot),
+        onPartySelect: (partyId) => focusParty(partyId)
       });
     }
 
@@ -1635,6 +2215,7 @@
     } catch (err) {
       showToast('Could not start a live session: ' + err.message, 'error');
     }
+    initUserLocation();
 
     try {
       await reloadAll();

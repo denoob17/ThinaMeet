@@ -25,8 +25,10 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -53,6 +55,12 @@ public class PartyMatchService {
     /** Results below this fit score are hidden: with active filters they simply do not match. */
     private static final int MIN_MATCH_SCORE = 65;
 
+    /**
+     * With a city (or a live GPS fix) active, an open party farther than this from the caller is out
+     * of town scope and must not leak into the "Open Parties" list.
+     */
+    private static final double MAX_CITY_DISTANCE_KM = 40.0;
+
     /** A tab that has not sent a heartbeat for this long is considered offline. */
     private static final long PRESENCE_STALE_MS = 5 * 60 * 1000L;
 
@@ -60,6 +68,12 @@ public class PartyMatchService {
     private static final String MIDPOINT_PLACEHOLDER = "TBD • Auto-Midpoint Public Spot";
 
     private static final String HOST = "You (Host)";
+
+    /** Name shown for the demo slots minted by GPS seeding, so they never look like your own parties. */
+    private static final String DEMO_HOST = "Local Host (Demo)";
+
+    /** Trust badge that marks a party as hosted by a CrewParty Pro member. */
+    private static final String PRO_HOST_BADGE = "Pro Host";
 
     /** Keywords used to guess whether a venue fits a theme. */
     private static final List<String> GAMES_KEYWORDS =
@@ -76,25 +90,25 @@ public class PartyMatchService {
     private static final List<SeedTemplate> SEED_TEMPLATES = List.of(
             new SeedTemplate("North Loop Board Game Cafe", "Board Game Cafe", "Board Games",
                     List.of("Great Table Space", "Budget Friendly"), 18, 0.012, 0.006, "Sat 4:00 PM",
-                    GuestSession.SOLO, GuestSession.CHILL),
+                    GuestSession.SOLO, GuestSession.CHILL, true),
             new SeedTemplate("Riverside Coworking & Chill", "Coworking Lounge", "Coworking & Chill",
                     List.of("Great Wi-Fi", "Quiet Enough to Talk"), 12, -0.009, 0.014, "Sun 11:00 AM",
-                    GuestSession.SOLO, GuestSession.CHILL),
+                    GuestSession.SOLO, GuestSession.CHILL, false),
             new SeedTemplate("Midtown Sports & Rec Meetup", "Sports & Rec Center", "Active / Sports",
                     List.of("Open Courts", "Budget Friendly"), 10, 0.005, -0.016, "Sat 9:00 AM",
-                    GuestSession.COUPLES, GuestSession.ACTIVE),
+                    GuestSession.COUPLES, GuestSession.ACTIVE, true),
             new SeedTemplate("Corner Coffee & Trivia", "Coffee & Trivia House", "Coffee & Trivia",
                     List.of("Craft Drinks", "Quiet Enough to Talk"), 8, -0.015, -0.008, "Thu 8:00 PM",
-                    GuestSession.SOLO, GuestSession.CHILL),
+                    GuestSession.SOLO, GuestSession.CHILL, true),
             new SeedTemplate("Old Town Tabletop Lounge", "Board Game Cafe", "Board Games",
                     List.of("Huge Game Library", "Late Night"), 22, 0.019, 0.011, "Fri 7:00 PM",
-                    GuestSession.COUPLES, GuestSession.CHILL),
+                    GuestSession.COUPLES, GuestSession.CHILL, false),
             new SeedTemplate("Harbor View Park Meetup", "Public Park Meetup", "Active / Sports",
                     List.of("Outdoor Casual", "Budget Friendly"), 0, -0.020, 0.004, "Sun 5:00 PM",
-                    GuestSession.FAMILY, GuestSession.ACTIVE),
+                    GuestSession.FAMILY, GuestSession.ACTIVE, false),
             new SeedTemplate("Central Library Coworking Corner", "Coworking Lounge", "Coworking & Chill",
                     List.of("Great Wi-Fi", "Budget Friendly"), 5, 0.002, 0.020, "Sat 1:00 PM",
-                    GuestSession.SOLO, GuestSession.CHILL));
+                    GuestSession.SOLO, GuestSession.CHILL, false));
 
     private final InMemoryStoreRepository repository;
     private final AiIcebreakerService icebreakerService;
@@ -252,7 +266,8 @@ public class PartyMatchService {
         int scoringBudget = budgetMax >= 0 ? budgetMax : 0;
         Set<String> friendIds = friendsOnly ? acceptedFriendIds(guestId) : Set.of();
         boolean strict = budgetMax >= 0 || isActiveFilter(format) || isActiveFilter(pace)
-                || publicSafeOnly || verifiedOnly || miniGroupOnly || friendsOnly;
+                || publicSafeOnly || verifiedOnly || miniGroupOnly || friendsOnly
+                || !isAny(city, ANY_CITY);
 
         List<Party> parties = new ArrayList<>();
         for (Party party : repository.getOpenParties()) {
@@ -272,16 +287,20 @@ public class PartyMatchService {
             }
 
             if (strict) {
-                if (!matchesStrict(party, budgetMin, budgetMax, format, pace, friendsOnly, friendIds,
+                if (!matchesStrict(party, city, caller, budgetMin, budgetMax, format, pace, friendsOnly, friendIds,
                         publicSafeOnly, verifiedOnly, miniGroupOnly)) {
                     continue;
                 }
-            } else if (party.getFitScore() < MIN_MATCH_SCORE) {
+            } else if (party.getFitScore() < MIN_MATCH_SCORE && !isCustomMapSpot(party)) {
+                // A slot dropped on a real map spot stays discoverable for everyone in town even when
+                // its fit score alone would hide it; the Public-Only Safe Spots filter still hides it.
                 continue;
             }
             parties.add(party);
         }
-        parties.sort(Comparator.comparingInt(Party::getFitScore).reversed());
+        // Highest fit score first; on a tie, Pro Host parties get the nod.
+        parties.sort(Comparator.comparingInt(Party::getFitScore).reversed()
+                .thenComparingInt(party -> party.getTrustBadges().contains(PRO_HOST_BADGE) ? 0 : 1));
 
         return new SearchOutcome(
                 parties,
@@ -289,9 +308,33 @@ public class PartyMatchService {
                 venuesMatching(theme, city, publicSafeOnly));
     }
 
-    private boolean matchesStrict(Party party, int budgetMin, int budgetMax, String format, String pace,
-                                  boolean friendsOnly, Set<String> friendIds, boolean publicSafeOnly,
-                                  boolean verifiedOnly, boolean miniGroupOnly) {
+    /**
+     * An open party pinned to a real map spot: live coordinates plus a place name, but no verified
+     * venue behind it. Those must stay visible for every other user in town, both in the open list
+     * and on the map, instead of being filtered out by the fit-score cut-off.
+     */
+    private boolean isCustomMapSpot(Party party) {
+        return party.getVenueId() == null
+                && party.getLat() != 0 && party.getLng() != 0
+                && party.getVenueName() != null && !party.getVenueName().isBlank();
+    }
+
+    private boolean matchesStrict(Party party, String city, GuestSession caller, int budgetMin, int budgetMax,
+                                  String format, String pace, boolean friendsOnly, Set<String> friendIds,
+                                  boolean publicSafeOnly, boolean verifiedOnly, boolean miniGroupOnly) {
+        // A selected city (or a live GPS fix) makes the town boundary mandatory: parties in another city
+        // never show up, and a party farther than MAX_CITY_DISTANCE_KM from a caller with coordinates is
+        // treated as out of town and dropped from the "Open Parties" list.
+        if (!isAny(city, ANY_CITY)) {
+            if (!equalsIgnoreCase(party.getCity(), city)) {
+                return false;
+            }
+            boolean callerHasCoords = caller != null && caller.getLat() != 0 && caller.getLng() != 0;
+            boolean partyHasCoords = party.getLat() != 0 && party.getLng() != 0;
+            if (callerHasCoords && partyHasCoords && party.getDistanceKm() > MAX_CITY_DISTANCE_KM) {
+                return false;
+            }
+        }
         if (budgetMax >= 0 && !(party.getBudgetMin() <= budgetMax && party.getBudgetMax() >= budgetMin)) {
             return false;
         }
@@ -308,6 +351,8 @@ public class PartyMatchService {
             return false;
         }
         if (publicSafeOnly) {
+            // A custom spot (venueId == null) is never a verified Public Safe Spot, so it only shows
+            // up in the open list / on the map while this filter is switched off.
             Venue venue = party.getVenueId() == null ? null
                     : repository.findVenue(party.getVenueId()).orElse(null);
             if (venue == null || !venue.isPublicSafeSpot()) {
@@ -369,15 +414,16 @@ public class PartyMatchService {
                 repository.onlineGuests(),
                 repository.acceptedRelationsFor(guestId),
                 repository.pendingRequestsFor(guestId),
-                repository.pendingInvitesFor(guestId));
+                repository.pendingInvitesFor(guestId),
+                repository.getStateRevision());
     }
 
     // -------------------------------------------------------------- GPS seeding
 
     /**
      * Generates a fresh public demo pool (6-8 venues + matching open slots) clustered within ~3 km
-     * of the caller. Repeated calls for the same city/cell return the already generated pool instead
-     * of flooding the store with duplicates.
+     * of the caller. A repeated call within 15 km returns the already generated pool instead of
+     * flooding the store with duplicates.
      */
     public GpsSeedResponse gpsSeed(GpsSeedRequest request) {
         if (request == null) {
@@ -388,7 +434,8 @@ public class PartyMatchService {
         if (repository.hasVenueNear(city, request.lat(), request.lng())) {
             List<Venue> existingVenues = repository.getVenues().stream()
                     .filter(Venue::isDemoPool)
-                    .filter(venue -> sameCity(venue.getCity(), city))
+                    .filter(venue -> haversineKm(request.lat(), request.lng(),
+                            venue.getLat(), venue.getLng()) <= 15.0)
                     .toList();
             List<Party> existingParties = existingVenues.stream()
                     .flatMap(venue -> repository.openPartiesAtVenue(venue.getId()).stream())
@@ -405,13 +452,14 @@ public class PartyMatchService {
                     request.lat() + template.dLat(), request.lng() + template.dLng());
             venue.setPublicSafeSpot(true);
             venue.setDemoPool(true);
+            venue.setFeaturedPartner(template.featuredPartner());
             repository.saveVenue(venue);
             createdVenues.add(venue);
 
             Party party = new Party(repository.nextPartyId(),
                     template.theme() + " crew forming near you", template.theme(), city, "Near You",
                     4, 1, template.cost(), template.cost() + 15, template.timeLabel(),
-                    venue.getId(), venue.getName(), List.of(HOST),
+                    venue.getId(), venue.getName(), List.of(DEMO_HOST),
                     List.of("Kick things off: what are you hoping to find in a new crew?"),
                     Party.OPEN);
             party.setFormat(template.format());
@@ -426,7 +474,6 @@ public class PartyMatchService {
             createdParties.add(party);
         }
         repository.recountVenueLoad();
-        repository.markSeeded(city, request.lat(), request.lng());
 
         return new GpsSeedResponse(city, request.lat(), request.lng(),
                 createdVenues.size(), createdParties.size(), createdVenues, createdParties, true);
@@ -474,7 +521,17 @@ public class PartyMatchService {
                 : "Guest";
         List<String> queue = new ArrayList<>(party.getQueueGuestNames());
         if (!queue.contains(name)) {
-            queue.add(name);
+            GuestSession requester = findGuest(request == null ? null : request.guestId());
+            if (requester != null && requester.isPro()) {
+                // Pro members cut ahead of free guests, but stay behind other Pro members already waiting.
+                int insertAt = 0;
+                while (insertAt < queue.size() && isProDisplayName(queue.get(insertAt))) {
+                    insertAt++;
+                }
+                queue.add(insertAt, name);
+            } else {
+                queue.add(name);
+            }
             party.setQueueGuestNames(queue);
         }
         repository.recountVenueLoad();
@@ -493,13 +550,27 @@ public class PartyMatchService {
         }
 
         GuestSession creator = findGuest(request.guestId());
+        enforceCreateLimits(creator, request.midpointMode());
+
+        boolean hasSpotName = request.spotName() != null && !request.spotName().isBlank();
+        double spotLat = request.spotLat() != null ? request.spotLat()
+                : (creator != null ? creator.getLat() : 0);
+        double spotLng = request.spotLng() != null ? request.spotLng()
+                : (creator != null ? creator.getLng() : 0);
 
         Venue venue = null;
         if (request.venueId() != null && !request.venueId().isBlank()) {
             venue = repository.findVenue(request.venueId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Pick a venue for your party."));
         } else if (!request.midpointMode()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Pick a venue for your party.");
+            if (!hasSpotName) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Pick a venue for your party.");
+            }
+            if (request.isListedPlace()) {
+                // The host tapped a real organization on the map: reuse the matching venue or mint one.
+                venue = resolveOrCreateListedVenue(request.spotName().trim(), request.spotCategory(),
+                        request.city(), request.neighborhood(), spotLat, spotLng);
+            }
         }
 
         String city = firstNonBlank(request.city(),
@@ -525,18 +596,26 @@ public class PartyMatchService {
         memberNames.addAll(members);
 
         int totalSlots = Math.max(request.totalSlots(), members.size());
-        boolean midpoint = request.midpointMode() || venue == null;
-        // An explicit venue party lives at the venue (so distanceKm is "you -> the spot"); a midpoint
-        // party starts at the creator and is snapped to the fair average once the first guest joins.
+        // A custom spot lives at the dropped pin and deliberately has no venueId; an explicit venue
+        // party lives at that venue (distanceKm = "you -> the spot"); a midpoint party starts at the
+        // creator and is snapped to the fair average once the first guest joins.
+        boolean customSpot = venue == null && !request.midpointMode();
+        boolean midpoint = request.midpointMode();
         double lat;
         double lng;
-        if (!midpoint) {
+        if (customSpot) {
+            lat = spotLat;
+            lng = spotLng;
+        } else if (!midpoint) {
             lat = venue.getLat();
             lng = venue.getLng();
         } else {
             lat = creator != null ? creator.getLat() : (venue != null ? venue.getLat() : 0);
             lng = creator != null ? creator.getLng() : (venue != null ? venue.getLng() : 0);
         }
+
+        String venueName = venue != null ? venue.getName()
+                : (customSpot ? request.spotName().trim() : MIDPOINT_PLACEHOLDER);
 
         Party party = new Party(
                 repository.nextPartyId(),
@@ -550,7 +629,7 @@ public class PartyMatchService {
                 Math.max(request.budgetMax(), request.budgetMin()),
                 firstNonBlank(request.timeLabel(), "This weekend"),
                 venue == null ? null : venue.getId(),
-                venue == null ? MIDPOINT_PLACEHOLDER : venue.getName(),
+                venueName,
                 members,
                 icebreakerService.generateIcebreakers(request.theme(), request.title(), city),
                 Party.OPEN);
@@ -565,8 +644,14 @@ public class PartyMatchService {
         party.setPace(firstNonBlank(request.pace(),
                 creator == null ? null : creator.getPace(), GuestSession.CHILL));
         party.setMiniGroupPriority(request.miniGroupPriority());
-        if (creator != null && !creator.getVerificationBadges().isEmpty()) {
-            party.setTrustBadges(creator.getVerificationBadges());
+        List<String> badges = creator == null
+                ? new ArrayList<>()
+                : new ArrayList<>(creator.getVerificationBadges());
+        if (creator != null && creator.isPro() && !badges.contains(PRO_HOST_BADGE)) {
+            badges.add(PRO_HOST_BADGE);
+        }
+        if (!badges.isEmpty()) {
+            party.setTrustBadges(badges);
         }
 
         scoreParty(party, party.getTheme(), party.getCity(), 0);
@@ -589,6 +674,7 @@ public class PartyMatchService {
 
         if (guestId != null && !guestId.isBlank()) {
             GuestSession guest = requireGuest(guestId);
+            enforceActiveHangoutLimit(guest, party);
             if (party.getOpenSlots() <= 0 && !party.getMemberGuestIds().contains(guest.getGuestId())) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
                         "This party is already full. Join the queue instead.");
@@ -674,19 +760,22 @@ public class PartyMatchService {
 
         String normalized = action == null ? "" : action.trim().toUpperCase(Locale.ROOT);
         if ("ACCEPT".equals(normalized)) {
+            Party party = repository.findParty(invite.getPartyId()).orElse(null);
+            GuestSession guest = findGuest(invite.getToGuestId());
+            if (party != null && guest != null) {
+                enforceActiveHangoutLimit(guest, party);
+            }
             invite.setStatus(SlotInvite.ACCEPTED);
-            repository.findParty(invite.getPartyId()).ifPresent(party -> {
-                GuestSession guest = findGuest(invite.getToGuestId());
-                if (guest != null) {
-                    attachGuest(party, guest);
-                    if (party.isMidpointMode()) {
-                        recalcMidpoint(party);
-                    }
-                    repository.recountVenueLoad();
+            if (party != null && guest != null) {
+                attachGuest(party, guest);
+                if (party.isMidpointMode()) {
+                    recalcMidpoint(party);
                 }
-            });
+                repository.recountVenueLoad();
+            }
         } else if ("DECLINE".equals(normalized)) {
             invite.setStatus(SlotInvite.DECLINED);
+            repository.bumpRevision();
         } else {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Action must be ACCEPT or DECLINE.");
         }
@@ -708,6 +797,26 @@ public class PartyMatchService {
     }
 
     // -------------------------------------------------------------- profile
+
+    /**
+     * Test-mode Stripe checkout. When the caller supplies the {@code guestId} of a known session,
+     * that device is upgraded to Pro; the response body stays the same so older callers keep working.
+     */
+    public Map<String, Object> checkout(Map<String, String> body) {
+        String guestId = body == null ? null : body.get("guestId");
+        if (guestId != null && !guestId.isBlank()) {
+            repository.findGuest(guestId).ifPresent(session -> {
+                session.setPro(true);
+                repository.saveGuest(session);
+            });
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "PRO_UNLOCKED");
+        response.put("plan", "CrewParty Pro");
+        response.put("amountUsd", 9.99);
+        response.put("message", "Test-mode upgrade complete. Pro features are unlocked on this device.");
+        return response;
+    }
 
     /** Patches the guest profile; every {@code null} field means "leave it as is". */
     public GuestSession updateProfile(ProfileUpdateRequest request) {
@@ -749,8 +858,52 @@ public class PartyMatchService {
         if (request.verificationBadges() != null) {
             session.setVerificationBadges(request.verificationBadges());
         }
+        if (request.lat() != null) {
+            session.setLat(request.lat());
+        }
+        if (request.lng() != null) {
+            session.setLng(request.lng());
+        }
         session.setLastSeenEpochMs(System.currentTimeMillis());
         return session;
+    }
+
+    /**
+     * Removes a guest from a party roster. When the creator leaves an otherwise empty party the party
+     * is completed (so it drops out of every "open parties" list) instead of lingering as a ghost slot.
+     */
+    public Party leaveParty(String partyId, String guestId) {
+        Party party = repository.findParty(partyId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Party not found: " + partyId));
+        GuestSession guest = requireGuest(guestId);
+
+        int index = party.getMemberGuestIds().indexOf(guest.getGuestId());
+        if (index < 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "You are not a member of this party.");
+        }
+
+        List<String> memberGuestIds = new ArrayList<>(party.getMemberGuestIds());
+        memberGuestIds.remove(index);
+        party.setMemberGuestIds(memberGuestIds);
+
+        List<String> memberNames = new ArrayList<>(party.getMemberNames());
+        if (index < memberNames.size()) {
+            memberNames.remove(index);
+        }
+        party.setMemberNames(memberNames);
+
+        List<String> members = new ArrayList<>(party.getMembers());
+        if (index < members.size()) {
+            members.remove(index);
+        }
+        party.setMembers(members);
+        party.setFilledSlots(memberGuestIds.size());
+
+        if (memberGuestIds.isEmpty()) {
+            party.setStatus(Party.COMPLETED);
+        }
+        repository.recountVenueLoad();
+        return party;
     }
 
     // ------------------------------------------------------------ party state
@@ -865,6 +1018,31 @@ public class PartyMatchService {
         }
     }
 
+    /**
+     * Matches a real organization the host tapped on the map to a stored venue: the same name or a
+     * spot within 50 m counts as the same place. Otherwise a new, non-promoted public safe venue is
+     * minted so the party can hang off a real {@code venueId} and appear in venue-based views.
+     */
+    private Venue resolveOrCreateListedVenue(String name, String category, String city, String neighborhood,
+                                             double lat, double lng) {
+        for (Venue venue : repository.getVenues()) {
+            boolean sameName = equalsIgnoreCase(venue.getName(), name);
+            boolean sameSpot = haversineKm(lat, lng, venue.getLat(), venue.getLng()) <= 0.05;
+            if (sameName || sameSpot) {
+                return venue;
+            }
+        }
+
+        String resolvedCity = firstNonBlank(city, "City Center");
+        Venue created = new Venue(repository.nextVenueId(), name,
+                firstNonBlank(category, "Public Place"), resolvedCity,
+                firstNonBlank(neighborhood, resolvedCity), 0, 0, 0, List.of(), lat, lng);
+        created.setPublicSafeSpot(true);
+        created.setFeaturedPartner(false);
+        created.setDemoPool(false);
+        return repository.saveVenue(created);
+    }
+
     /** Adds the guest to the party roster without a capacity check (invites may reserve a slot). */
     private void attachGuest(Party party, GuestSession guest) {
         if (party.getMemberGuestIds().contains(guest.getGuestId())) {
@@ -905,6 +1083,51 @@ public class PartyMatchService {
 
     private GuestSession findGuest(String guestId) {
         return guestId == null || guestId.isBlank() ? null : repository.findGuest(guestId).orElse(null);
+    }
+
+    /** Free tier: a non-Pro host may keep only one active party, and may not use Fair-Midpoint. */
+    private void enforceCreateLimits(GuestSession creator, boolean midpointMode) {
+        if (creator == null || creator.isPro()) {
+            return;
+        }
+        if (midpointMode) {
+            throw new ResponseStatusException(HttpStatus.PAYMENT_REQUIRED,
+                    "Fair-Midpoint auto-matching is a CrewParty Pro feature.");
+        }
+        long hostedActive = repository.getOpenParties().stream()
+                .filter(party -> !party.getMemberGuestIds().isEmpty()
+                        && creator.getGuestId().equals(party.getMemberGuestIds().get(0)))
+                .count();
+        if (hostedActive >= 1) {
+            throw new ResponseStatusException(HttpStatus.PAYMENT_REQUIRED,
+                    "Free plan limit: max 1 active party. Upgrade to CrewParty Pro for unlimited parties.");
+        }
+    }
+
+    /** Free tier: a non-Pro guest may sit in at most two active parties at once. */
+    private void enforceActiveHangoutLimit(GuestSession guest, Party target) {
+        if (guest == null || guest.isPro()) {
+            return;
+        }
+        if (target != null && target.getMemberGuestIds().contains(guest.getGuestId())) {
+            return; // already seated here: nothing new is being claimed
+        }
+        long active = repository.getOpenParties().stream()
+                .filter(party -> party.getMemberGuestIds().contains(guest.getGuestId()))
+                .count();
+        if (active >= 2) {
+            throw new ResponseStatusException(HttpStatus.PAYMENT_REQUIRED,
+                    "Free plan limit: max 2 active hangouts at once. Upgrade to Pro for unlimited slots.");
+        }
+    }
+
+    /** Whether any Pro session in the store uses this display name (queues only store names). */
+    private boolean isProDisplayName(String displayName) {
+        if (displayName == null) {
+            return false;
+        }
+        return repository.onlineGuests().stream()
+                .anyMatch(session -> session.isPro() && displayName.equals(session.getDisplayName()));
     }
 
     /** Labels the generated pool: explicit name, else the closest known demo city, else a neutral one. */
@@ -981,10 +1204,6 @@ public class PartyMatchService {
         return null;
     }
 
-    private boolean sameCity(String left, String right) {
-        return left != null && right != null && left.trim().equalsIgnoreCase(right.trim());
-    }
-
     private boolean equalsIgnoreCase(String left, String right) {
         return left != null && right != null && left.trim().equalsIgnoreCase(right.trim());
     }
@@ -996,7 +1215,7 @@ public class PartyMatchService {
     /** One entry of the deterministic demo pool generated around the caller's GPS position. */
     private record SeedTemplate(String name, String category, String theme, List<String> tags,
                                 int cost, double dLat, double dLng, String timeLabel,
-                                String format, String pace) {
+                                String format, String pace, boolean featuredPartner) {
     }
 
     private record ScoredPlayer(Friend player, int score) {

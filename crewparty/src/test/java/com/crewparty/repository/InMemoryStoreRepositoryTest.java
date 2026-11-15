@@ -83,17 +83,22 @@ class InMemoryStoreRepositoryTest {
     }
 
     @Test
-    void gpsSeedingIsDeduplicatedByCityAndRoundedCell() {
+    void gpsSeedingIsDeduplicatedWithinFifteenKilometres() {
         InMemoryStoreRepository repository = seeded();
 
+        // The seeded venues are real places, not a generated demo pool, so nothing is deduplicated yet.
         assertThat(repository.hasVenueNear("Chicago", 41.8781, -87.6298)).isFalse();
-        repository.markSeeded("Chicago", 41.8781, -87.6298);
+
+        Venue pool = new Venue("vDemo", "North Loop Board Game Cafe", "Board Game Cafe", "Chicago",
+                "Near You", 18, 4.5, 20, List.of(), 41.8781, -87.6298);
+        pool.setDemoPool(true);
+        repository.saveVenue(pool);
 
         assertThat(repository.hasVenueNear("Chicago", 41.8781, -87.6298)).isTrue();
-        // Same city, different ~100 m cell -> a fresh pool is allowed.
-        assertThat(repository.hasVenueNear("Chicago", 41.9999, -87.6298)).isFalse();
-        // Same cell, different city -> not deduplicated against this city's pool.
-        assertThat(repository.hasVenueNear("Austin", 41.8781, -87.6298)).isFalse();
+        // ~13.5 km away in the same metro -> still shares the pool instead of duplicating it.
+        assertThat(repository.hasVenueNear("Chicago", 41.9999, -87.6298)).isTrue();
+        // Well outside the 15 km radius -> a fresh pool is allowed.
+        assertThat(repository.hasVenueNear("Chicago", 30.2672, -97.7431)).isFalse();
     }
 
     @Test

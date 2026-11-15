@@ -168,6 +168,13 @@ public class ApiController {
         return matchService.completeParty(id);
     }
 
+    /** Drops the caller out of a party roster; an emptied party is completed automatically. */
+    @PostMapping("/parties/{id}/leave")
+    public Party leaveParty(@PathVariable String id, @RequestBody(required = false) Map<String, String> body) {
+        String guestId = body == null ? null : body.get("guestId");
+        return matchService.leaveParty(id, guestId);
+    }
+
     // -------------------------------------------------------- history & friends
 
     @PostMapping("/history/{visitId}/rate")
@@ -212,12 +219,7 @@ public class ApiController {
     }
 
     @PostMapping("/checkout")
-    public Map<String, Object> checkout() {
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("status", "PRO_UNLOCKED");
-        response.put("plan", "CrewParty Pro");
-        response.put("amountUsd", 9.99);
-        response.put("message", "Test-mode upgrade complete. Pro features are unlocked on this device.");
-        return response;
+    public Map<String, Object> checkout(@RequestBody(required = false) Map<String, String> body) {
+        return matchService.checkout(body);
     }
 }

@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -48,6 +49,13 @@ class PartyMatchServiceTest {
                 GuestSession.SOLO, GuestSession.CHILL, 0, budgetMax, List.of("ID Verified"));
         session.setLastSeenEpochMs(System.currentTimeMillis());
         return repository.saveGuest(session);
+    }
+
+    /** Upgrades a test guest to CrewParty Pro so the free-tier limits stop applying. */
+    private void pro(String guestId) {
+        GuestSession session = repository.findGuest(guestId).orElseThrow();
+        session.setPro(true);
+        repository.saveGuest(session);
     }
 
     private Venue venue(String id, String name, String city, int cost, double lat, double lng, boolean publicSafe) {
@@ -207,6 +215,8 @@ class PartyMatchServiceTest {
             assertThat(PartyMatchService.haversineKm(41.8781, -87.6298, v.getLat(), v.getLng()))
                     .isLessThan(3.0);
         });
+        // A couple of templates are promoted partners so any GPS city shows ads even zoomed out.
+        assertThat(first.venues()).filteredOn(Venue::isFeaturedPartner).hasSize(3);
 
         GpsSeedResponse repeat = service.gpsSeed(new GpsSeedRequest(41.8781, -87.6298, "Chicago"));
         assertThat(repeat.venuesCreated()).isZero();
@@ -256,13 +266,15 @@ class PartyMatchServiceTest {
     void midpointPartyLocksTheClosestAffordablePublicSpotOnJoin() {
         guest("gA", "Host", "Chicago", 40.0, -80.0, 30);
         guest("gB", "Guest", "Chicago", 40.2, -80.2, 30);
+        pro("gA"); // Fair-Midpoint is a Pro feature, so the host must be upgraded.
         venue("vNear", "Near Public Spot", "Chicago", 20, 40.1, -80.1, true);
         venue("vFar", "Far Cheap Spot", "Chicago", 10, 41.0, -87.0, true);
         venue("vPricy", "Pricy Spot", "Chicago", 500, 40.1, -80.1, true);
 
         Party created = service.createParty(new CreatePartyRequest(
                 "Midpoint Meetup", "Board Games", null, "Downtown", 4, 0, 30, "This weekend",
-                null, List.of(), "gA", true, GuestSession.SOLO, GuestSession.CHILL, false));
+                null, List.of(), "gA", true, GuestSession.SOLO, GuestSession.CHILL, false,
+                null, null, null, null, false));
 
         assertThat(created.isMidpointMode()).isTrue();
         assertThat(created.getVenueName()).isEqualTo("TBD • Auto-Midpoint Public Spot");
@@ -282,7 +294,8 @@ class PartyMatchServiceTest {
 
         Party created = service.createParty(new CreatePartyRequest(
                 "Catan Night", "Board Games", "Chicago", "Wicker Park", 4, 10, 30, "Sat 7 PM",
-                "v1", List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false));
+                "v1", List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                null, null, null, null, false));
 
         assertThat(created.isMidpointMode()).isFalse();
         assertThat(created.getVenueId()).isEqualTo("v1");
@@ -382,14 +395,14 @@ class PartyMatchServiceTest {
         session.setBudgetMin(5);
 
         GuestSession updated = service.updateProfile(new ProfileUpdateRequest(
-                "gA", "New Name", null, null, null, null, null, null, null, null, null, null));
+                "gA", "New Name", null, null, null, null, null, null, null, null, null, null, null, null));
 
         assertThat(updated.getDisplayName()).isEqualTo("New Name");
         assertThat(updated.getCity()).isEqualTo("Chicago");
         assertThat(updated.getBudgetMin()).isEqualTo(5);
 
         assertThatThrownBy(() -> service.updateProfile(new ProfileUpdateRequest(
-                null, "X", null, null, null, null, null, null, null, null, null, null)))
+                null, "X", null, null, null, null, null, null, null, null, null, null, null, null)))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(ex -> assertThat(status((ResponseStatusException) ex)).isEqualTo(400));
     }
@@ -403,23 +416,80 @@ class PartyMatchServiceTest {
 
         assertThatThrownBy(() -> service.createParty(new CreatePartyRequest(
                 "  ", "Board Games", "Chicago", "Wicker Park", 4, 10, 30, "Sat",
-                "v1", List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false)))
+                "v1", List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                null, null, null, null, false)))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(ex -> assertThat(status((ResponseStatusException) ex)).isEqualTo(400));
 
         assertThatThrownBy(() -> service.createParty(new CreatePartyRequest(
                 "No Venue", "Board Games", "Chicago", "Wicker Park", 4, 10, 30, "Sat",
-                null, List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false)))
+                null, List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                null, null, null, null, false)))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(ex -> assertThat(status((ResponseStatusException) ex)).isEqualTo(400));
 
         Party created = service.createParty(new CreatePartyRequest(
                 "Catan Night", "Board Games", "Chicago", "Wicker Park", 4, 10, 30, "Sat 7 PM",
-                "v1", List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false));
+                "v1", List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                null, null, null, null, false));
 
         assertThat(created.getStatus()).isEqualTo(Party.OPEN);
         assertThat(created.getIcebreakers()).hasSize(3);
         assertThat(created.getMemberNames()).contains("Host");
+    }
+
+    @Test
+    void listedPlacePartyBindsToOrCreatesAVenueAndStaysSafetyVerified() {
+        guest("gA", "Host", "Chicago", 41.88, -87.63, 40);
+        pro("gA"); // Two active parties are Pro-only, so this host upgrades first.
+
+        Party created = service.createParty(new CreatePartyRequest(
+                "Park Frisbee", "Outdoor Casual", "Chicago", "Lincoln Park", 4, 0, 20, "Sun 11 AM",
+                null, List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                "Lincoln Park Cafe", "Cafe", 41.9214, -87.6330, true));
+
+        assertThat(created.isMidpointMode()).isFalse();
+        assertThat(created.getVenueId()).isNotNull();
+        assertThat(created.getVenueName()).isEqualTo("Lincoln Park Cafe");
+
+        Venue venue = repository.findVenue(created.getVenueId()).orElseThrow();
+        assertThat(venue.getName()).isEqualTo("Lincoln Park Cafe");
+        assertThat(venue.getCategory()).isEqualTo("Cafe");
+        assertThat(venue.isPublicSafeSpot()).isTrue();
+        assertThat(venue.isFeaturedPartner()).isFalse();
+
+        // A second tap on the same real place reuses the venue instead of creating a duplicate.
+        Party again = service.createParty(new CreatePartyRequest(
+                "Park Frisbee Again", "Outdoor Casual", "Chicago", "Lincoln Park", 4, 0, 20, "Sun 2 PM",
+                null, List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                "Lincoln Park Cafe", "Cafe", 41.9214, -87.6330, true));
+        assertThat(again.getVenueId()).isEqualTo(created.getVenueId());
+    }
+
+    @Test
+    void customSpotPartyKeepsNoVenueAndIsHiddenByThePublicSafeFilter() {
+        guest("gA", "Host", "Chicago", 41.88, -87.63, 40);
+
+        Party custom = service.createParty(new CreatePartyRequest(
+                "Courtyard Jam", "Outdoor Casual", "Chicago", "Logan Square", 4, 0, 20, "Sat 4 PM",
+                null, List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                "Maple Street Courtyard", null, 41.9200, -87.7000, false));
+
+        assertThat(custom.getVenueId()).isNull();
+        assertThat(custom.getVenueName()).isEqualTo("Maple Street Courtyard");
+        assertThat(custom.isMidpointMode()).isFalse();
+        assertThat(custom.getLat()).isEqualTo(41.9200);
+        assertThat(custom.getLng()).isEqualTo(-87.7000);
+
+        // Off: the custom spot shows up in the open list.
+        PartyMatchService.SearchOutcome open = service.search("gA", "Chicago", null, null,
+                -1, -1, "All", "All", false, false, false, false);
+        assertThat(open.parties()).extracting(Party::getId).contains(custom.getId());
+
+        // On: a custom spot is not a verified Public Safe Spot, so the safety filter drops it.
+        PartyMatchService.SearchOutcome safe = service.search("gA", "Chicago", null, null,
+                -1, -1, "All", "All", false, true, false, false);
+        assertThat(safe.parties()).extracting(Party::getId).doesNotContain(custom.getId());
     }
 
     @Test
@@ -467,5 +537,217 @@ class PartyMatchServiceTest {
         assertThatThrownBy(() -> service.rateVisit(record.getId(), 9, List.of(), ""))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(ex -> assertThat(status((ResponseStatusException) ex)).isEqualTo(400));
+    }
+
+    // ------------------------------------------------- leaving a slot
+
+    @Test
+    void leavingFreesTheSeatAndKeepsThePartyOpenWhileOthersStay() {
+        guest("gHost", "Host", "Chicago", 41.88, -87.63, 40);
+        guest("gMember", "Member", "Chicago", 41.88, -87.63, 40);
+        Venue spot = venue("v1", "Snakes & Lattes", "Chicago", 22, 41.9088, -87.6774, true);
+        Party open = party("p1", "Chicago", "v1", "Snakes & Lattes", 4, 2,
+                10, 30, GuestSession.SOLO, GuestSession.CHILL, List.of("gHost", "gMember"), false);
+
+        Party after = service.leaveParty(open.getId(), "gMember");
+
+        assertThat(after.getStatus()).isEqualTo(Party.OPEN);
+        assertThat(after.getMemberGuestIds()).containsExactly("gHost");
+        assertThat(after.getFilledSlots()).isEqualTo(1);
+        assertThat(spot.getActiveSlotCount()).isEqualTo(1);
+    }
+
+    @Test
+    void hostLeavingAnEmptyPartyCompletesItAndDropsTheVenueLoad() {
+        guest("gHost", "Host", "Chicago", 41.88, -87.63, 40);
+        Venue spot = venue("v1", "Snakes & Lattes", "Chicago", 22, 41.9088, -87.6774, true);
+        Party solo = party("p1", "Chicago", "v1", "Snakes & Lattes", 4, 1,
+                10, 30, GuestSession.SOLO, GuestSession.CHILL, List.of("gHost"), false);
+
+        Party after = service.leaveParty(solo.getId(), "gHost");
+
+        assertThat(after.getStatus()).isEqualTo(Party.COMPLETED);
+        assertThat(after.getMemberGuestIds()).isEmpty();
+        assertThat(after.getFilledSlots()).isZero();
+        assertThat(spot.getActiveSlotCount()).isZero();
+    }
+
+    @Test
+    void leavePartyRejectsNonMembersAndUnknownParties() {
+        guest("gHost", "Host", "Chicago", 41.88, -87.63, 40);
+        guest("gOutsider", "Outsider", "Chicago", 41.88, -87.63, 40);
+        Party open = party("p1", "Chicago", null, "Spot", 4, 1, 10, 30,
+                GuestSession.SOLO, GuestSession.CHILL, List.of("gHost"), false);
+
+        assertThatThrownBy(() -> service.leaveParty(open.getId(), "gOutsider"))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(ex -> assertThat(status((ResponseStatusException) ex)).isEqualTo(409));
+
+        assertThatThrownBy(() -> service.leaveParty("missing", "gHost"))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(ex -> assertThat(status((ResponseStatusException) ex)).isEqualTo(404));
+    }
+
+    @Test
+    void profileUpdateStoresLiveCoordinates() {
+        guest("gGps", "Nomad", "Chicago", 41.88, -87.63, 40);
+
+        service.updateProfile(new ProfileUpdateRequest("gGps", null, null, "Астана", null,
+                null, null, null, null, null, null, null, 51.1694, 71.4491));
+
+        GuestSession session = repository.findGuest("gGps").orElseThrow();
+        assertThat(session.getCity()).isEqualTo("Астана");
+        assertThat(session.getLat()).isEqualTo(51.1694);
+        assertThat(session.getLng()).isEqualTo(71.4491);
+    }
+
+    // ------------------------------------------------- free tier & Pro perks
+
+    @Test
+    void freePlanCapsActivePartiesAndBlocksMidpoint() {
+        guest("gFree", "Free Host", "Chicago", 41.88, -87.63, 40);
+        venue("v1", "Snakes & Lattes", "Chicago", 22, 41.9088, -87.6774, true);
+
+        service.createParty(new CreatePartyRequest(
+                "First Party", "Board Games", "Chicago", "Wicker Park", 4, 10, 30, "Sat 7 PM",
+                "v1", List.of(), "gFree", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                null, null, null, null, false));
+
+        assertThatThrownBy(() -> service.createParty(new CreatePartyRequest(
+                "Second Party", "Board Games", "Chicago", "Wicker Park", 4, 10, 30, "Sat 9 PM",
+                "v1", List.of(), "gFree", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                null, null, null, null, false)))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("max 1 active party")
+                .satisfies(ex -> assertThat(status((ResponseStatusException) ex)).isEqualTo(402));
+
+        guest("gMid", "Mid Host", "Chicago", 41.88, -87.63, 40);
+        assertThatThrownBy(() -> service.createParty(new CreatePartyRequest(
+                "Midpoint Meetup", "Board Games", "Chicago", "Downtown", 4, 0, 30, "This weekend",
+                null, List.of(), "gMid", true, GuestSession.SOLO, GuestSession.CHILL, false,
+                null, null, null, null, false)))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("Fair-Midpoint")
+                .satisfies(ex -> assertThat(status((ResponseStatusException) ex)).isEqualTo(402));
+    }
+
+    @Test
+    void freePlanCapsActiveHangoutsUntilProUpgrades() {
+        guest("gFree", "Free Guest", "Chicago", 41.88, -87.63, 40);
+        party("p1", "Chicago", null, "Spot", 4, 1, 10, 30,
+                GuestSession.SOLO, GuestSession.CHILL, List.of("gFree"), false);
+        party("p2", "Chicago", null, "Spot", 4, 1, 10, 30,
+                GuestSession.SOLO, GuestSession.CHILL, List.of("gFree"), false);
+        Party third = party("p3", "Chicago", null, "Spot", 4, 1, 10, 30,
+                GuestSession.SOLO, GuestSession.CHILL, List.of(), false);
+
+        assertThatThrownBy(() -> service.joinParty(third.getId(), "gFree", null))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("max 2 active hangouts")
+                .satisfies(ex -> assertThat(status((ResponseStatusException) ex)).isEqualTo(402));
+
+        pro("gFree");
+        assertThat(service.joinParty(third.getId(), "gFree", null).getMemberGuestIds()).contains("gFree");
+    }
+
+    @Test
+    void checkoutUpgradesTheGuestAndProPerksApply() {
+        guest("gA", "Host", "Chicago", 41.88, -87.63, 40);
+
+        Map<String, Object> response = service.checkout(Map.of("guestId", "gA"));
+        assertThat(response).containsEntry("status", "PRO_UNLOCKED")
+                .containsEntry("plan", "CrewParty Pro")
+                .containsEntry("amountUsd", 9.99);
+        assertThat(repository.findGuest("gA").orElseThrow().isPro()).isTrue();
+
+        // Omitting the body keeps the legacy response shape.
+        assertThat(service.checkout(null)).containsEntry("status", "PRO_UNLOCKED");
+
+        venue("v1", "Snakes & Lattes", "Chicago", 22, 41.9088, -87.6774, true);
+        Party hosted = service.createParty(new CreatePartyRequest(
+                "Pro Night", "Board Games", "Chicago", "Wicker Park", 4, 10, 30, "Sat 7 PM",
+                "v1", List.of(), "gA", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                null, null, null, null, false));
+        assertThat(hosted.getTrustBadges()).contains("Pro Host");
+    }
+
+    @Test
+    void proMembersCutAheadInTheSlotQueue() {
+        guest("gFree", "Free Guest", "Chicago", 41.88, -87.63, 40);
+        guest("gPro", "Pro Guest", "Chicago", 41.88, -87.63, 40);
+        pro("gPro");
+        Party full = party("pFull", "Chicago", null, "Spot", 2, 2, 10, 30,
+                GuestSession.SOLO, GuestSession.CHILL, List.of(), false);
+
+        service.queueForSlot(full.getId(), new QueueRequest("gFree", "Free Guest"));
+        service.queueForSlot(full.getId(), new QueueRequest("gPro", "Pro Guest"));
+
+        assertThat(full.getQueueGuestNames()).containsExactly("Pro Guest", "Free Guest");
+    }
+
+    // --------------------------------------------- live map / slot synchronisation
+
+    @Test
+    void presenceReportsTheSharedStateRevision() {
+        GuestSession me = guest("gA", "Ada", "Chicago", 41.88, -87.63, 40);
+
+        PresenceResponse presence = service.presence(me.getGuestId());
+
+        assertThat(presence.stateRevision()).isEqualTo(repository.getStateRevision());
+    }
+
+    @Test
+    void everySharedChangeBumpsTheStateRevision() {
+        guest("gA", "Ada", "Chicago", 41.88, -87.63, 40);
+        guest("gB", "Bob", "Chicago", 41.88, -87.63, 40);
+
+        long before = repository.getStateRevision();
+
+        venue("v1", "Snakes & Lattes", "Chicago", 22, 41.9088, -87.6774, true);
+        long afterVenue = repository.getStateRevision();
+        assertThat(afterVenue).isGreaterThan(before);
+
+        Party open = party("p1", "Chicago", "v1", "Snakes & Lattes", 4, 2, 10, 30,
+                GuestSession.SOLO, GuestSession.CHILL, List.of("gA"), false);
+        long afterParty = repository.getStateRevision();
+        assertThat(afterParty).isGreaterThan(afterVenue);
+
+        // Joining, queueing, leaving and completing all recalculate the venue load, which bumps too.
+        service.joinParty(open.getId(), "gB", null);
+        long afterJoin = repository.getStateRevision();
+        assertThat(afterJoin).isGreaterThan(afterParty);
+
+        Party full = party("pFull", "Chicago", "v1", "Snakes & Lattes", 2, 2, 10, 30,
+                GuestSession.SOLO, GuestSession.CHILL, List.of("gA", "gB"), false);
+        long beforeQueue = repository.getStateRevision();
+        service.queueForSlot(full.getId(), new QueueRequest("gA", "Ada"));
+        long afterQueue = repository.getStateRevision();
+        assertThat(afterQueue).isGreaterThan(beforeQueue);
+
+        service.leaveParty(open.getId(), "gB");
+        assertThat(repository.getStateRevision()).isGreaterThan(afterQueue);
+
+        long beforeComplete = repository.getStateRevision();
+        service.completeParty(open.getId());
+        assertThat(repository.getStateRevision()).isGreaterThan(beforeComplete);
+    }
+
+    @Test
+    void aLowFitCustomSpotStaysVisibleToEveryoneInTown() {
+        guest("gHost", "Host", "Chicago", 41.88, -87.63, 40);
+        guest("gOther", "Other", "Chicago", 41.88, -87.63, 40);
+
+        Party custom = service.createParty(new CreatePartyRequest(
+                "Rooftop Hang", "Outdoor Casual", "Chicago", "Logan Square", 4, 0, 20, "Sat 4 PM",
+                null, List.of(), "gHost", false, GuestSession.SOLO, GuestSession.CHILL, false,
+                "Maple Street Courtyard", null, 41.9200, -87.7000, false));
+
+        // Searching another theme leaves the custom spot under the fit-score cut-off…
+        PartyMatchService.SearchOutcome other = service.search("gOther", "Chicago", "Board Games", null,
+                -1, -1, "All", "All", false, false, false, false);
+        assertThat(custom.getFitScore()).isLessThan(65);
+
+        // …yet a real map spot with a name is never hidden from other users in the same city.
+        assertThat(other.parties()).extracting(Party::getId).contains(custom.getId());
     }
 }

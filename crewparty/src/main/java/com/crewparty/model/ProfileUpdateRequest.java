@@ -18,6 +18,8 @@ public record ProfileUpdateRequest(
         String pace,
         Boolean publicVenuesOnly,
         Boolean miniGroupPriority,
-        List<String> verificationBadges
+        List<String> verificationBadges,
+        Double lat,
+        Double lng
 ) {
 }

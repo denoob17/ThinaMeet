@@ -28,8 +28,13 @@ public class GuestSession {
     private int budgetMin;
     private int budgetMax;
     private List<String> verificationBadges = new ArrayList<>();
-    private boolean publicVenuesOnly = true;
+    /**
+     * Off by default so two freshly opened tabs immediately see each other's slots, both at verified
+     * venues and on custom map spots. The "Public-Only Safe Spots" switch stays a manual filter.
+     */
+    private boolean publicVenuesOnly = false;
     private boolean miniGroupPriority;
+    private boolean pro;
     private long lastSeenEpochMs;
 
     public GuestSession() {
@@ -162,6 +167,15 @@ public class GuestSession {
 
     public void setMiniGroupPriority(boolean miniGroupPriority) {
         this.miniGroupPriority = miniGroupPriority;
+    }
+
+    /** True once this device has "paid" for CrewParty Pro (test-mode upgrade). */
+    public boolean isPro() {
+        return pro;
+    }
+
+    public void setPro(boolean pro) {
+        this.pro = pro;
     }
 
     public long getLastSeenEpochMs() {

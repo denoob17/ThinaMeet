@@ -163,8 +163,19 @@
 
         <h2 class="section-title">Crew Map</h2>
         <div class="map-panel card">
+          <div id="map-pick-banner" class="map-pick-banner" hidden>Click anywhere on the map to set the party spot</div>
           <div id="venue-map" class="venue-map" aria-label="Map of venues"></div>
-          <p class="map-hint">Pins simplify as you zoom out. Click any pin for its live slots, or click anywhere on the map to drop a custom spot.</p>
+          <div class="map-legend" aria-label="Map legend">
+            <span class="legend-item"><span class="legend-pin legend-featured"></span>Featured Partners (Promoted)</span>
+            <span class="legend-item"><span class="legend-pin legend-safe"></span>All Venues &amp; Open Spots (Zoom in)</span>
+            <span class="legend-item"><span class="legend-pin legend-custom"></span>Custom Spot</span>
+          </div>
+          <p class="map-hint">Below Zoom 14 only promoted partners show. Zoom in to reveal every venue, real place and open spot &mdash; or click anywhere on the map to drop a custom spot.</p>
+        </div>
+
+        <h2 class="section-title">My Open Slots <span class="count-pill" id="my-slots-count">0</span></h2>
+        <div id="my-slots-list" class="card-list">
+          <div class="loading">Loading your slots…</div>
         </div>
 
         <h2 class="section-title">Open Parties</h2>
@@ -389,6 +400,7 @@
         <label class="check-row check-row-strong">
           <input type="checkbox" id="create-midpoint" data-action="toggle-midpoint" />
           <span>No venue selected — auto-pick Fair-Midpoint between members</span>
+          <span class="badge badge-pro">PRO</span>
         </label>
         <p class="hint" id="midpoint-hint" hidden>CrewParty will average everyone's location and lock the closest public safe spot that fits your budget once people join.</p>
 
@@ -411,6 +423,7 @@
           <div class="field" id="create-venue-field">
             <label class="field-label" for="create-venue">Venue</label>
             <select id="create-venue" class="select" data-action="create-venue"></select>
+            <button type="button" class="btn btn-ghost btn-sm pick-spot-btn" data-action="pick-spot-on-map">Pick Spot on Map</button>
           </div>
         </div>
 
