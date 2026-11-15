@@ -972,6 +972,7 @@
 
   const renderAll = (options) => {
     const opts = options || {};
+    updateFilterUi();
     renderMySlots();
     renderParties();
     renderPlayers();
@@ -1060,9 +1061,70 @@
     syncBudget();
   };
 
+  /* ---------------- filters drawer, chips, summary ---------------- */
+
+  const openFilters = () => {
+    el('filter-sidebar').classList.add('open');
+    el('filter-sidebar').setAttribute('aria-hidden', 'false');
+    el('filters-scrim').hidden = false;
+    el('filters-toggle').setAttribute('aria-expanded', 'true');
+    const first = el('filter-theme');
+    if (first) window.setTimeout(() => first.focus(), 260);
+  };
+
+  const closeFilters = () => {
+    const bar = el('filter-sidebar');
+    if (!bar || !bar.classList.contains('open')) return;
+    bar.classList.remove('open');
+    bar.setAttribute('aria-hidden', 'true');
+    el('filters-scrim').hidden = true;
+    el('filters-toggle').setAttribute('aria-expanded', 'false');
+    el('filters-toggle').focus();
+  };
+
+  const toggleFilters = () => {
+    if (el('filter-sidebar').classList.contains('open')) closeFilters();
+    else openFilters();
+  };
+
+  const updateFilterUi = () => {
+    const f = state.filters;
+    const active = [
+      f.city && f.city !== 'All Cities',
+      !!f.theme,
+      !!f.timeWindow,
+      f.budgetMin > 0 || f.budgetMax < 100,
+      f.format && f.format !== 'All',
+      f.pace && f.pace !== 'All',
+      f.friendsOnly, f.publicSafeOnly, f.verifiedOnly, f.miniGroupOnly
+    ].filter(Boolean).length;
+
+    const badge = el('filters-count');
+    if (badge) { badge.textContent = active; badge.hidden = active === 0; }
+    const clear = el('filters-clear');
+    if (clear) clear.hidden = active === 0;
+    document.querySelectorAll('.qchip').forEach((chip) => {
+      chip.classList.toggle('active', (chip.dataset.theme || '') === (f.theme || ''));
+    });
+
+    const sum = el('results-summary');
+    if (sum) {
+      const p = state.results.parties.length;
+      const pl = state.results.players.length;
+      const bits = [];
+      if (f.city && f.city !== 'All Cities') bits.push(f.city);
+      if (f.theme) bits.push(f.theme);
+      if (f.timeWindow) bits.push(f.timeWindow);
+      if (f.budgetMin > 0 || f.budgetMax < 100) bits.push(`$${f.budgetMin}\u2013$${f.budgetMax}`);
+      sum.textContent = `${p} ${p === 1 ? 'open party' : 'open parties'} \u00b7 ${pl} ${pl === 1 ? 'person' : 'people'}` +
+        (bits.length ? ` \u00b7 ${bits.join(', ')}` : '');
+    }
+  };
+
   const doSearch = async (options) => {
     const opts = options || {};
     readFilters();
+    updateFilterUi();
     if (!opts.silent) {
       el('party-list').innerHTML = loading('Searching parties\u2026');
       el('player-list').innerHTML = loading('Searching players\u2026');
@@ -1457,24 +1519,6 @@
     }
     openCreateModal({ title: 'Crew Night with My Friends', buddyIds: buddies });
     showToast('Pick a theme and venue, then create your party.', 'info');
-  };
-
-  const runDemoPreset = () => {
-    const city = state.filters.city !== 'All Cities' ? state.filters.city : 'Chicago';
-    const buddies = state.friends.filter((f) => f.status === 'CORE_BUDDY' || f.status === 'FRIEND').slice(0, 2).map((f) => f.id);
-    const venue = state.venues.find((v) => v.city === city) || state.venues[0];
-    openCreateModal({
-      title: 'Board Game Night \u2014 2 Buddies Seeking 2 Players',
-      theme: 'Board Games',
-      city,
-      totalSlots: 4,
-      budgetMin: 10,
-      budgetMax: 30,
-      timeLabel: 'Sat 3:00 PM',
-      buddyIds: buddies,
-      venueId: venue ? venue.id : ''
-    });
-    submitCreate();
   };
 
   /* ---------------- map spot picking ---------------- */
@@ -2071,19 +2115,25 @@
 
   const CLICK_ACTIONS = {
     'switch-tab': (node) => switchTab(node.dataset.tab),
-    'open-second-tab': () => window.open(window.location.href, '_blank'),
     'toggle-notif': (node) => toggleNotif(node),
-    'demo': () => runDemoPreset(),
     'open-paywall': () => openPaywall(),
     'close-modal': (node) => closeModalFrom(node),
     'start-pro': (node) => startPro(node),
-    'search': () => doSearch(),
+    'search': () => { doSearch(); closeFilters(); },
+    'toggle-filters': () => toggleFilters(),
+    'close-filters': () => closeFilters(),
+    'quick-theme': (node) => {
+      let t = node.dataset.theme || '';
+      if (t && val('filter-theme') === t) t = '';
+      el('filter-theme').value = t;
+      doSearch({ silent: true });
+    },
     'reset-filters': () => resetFilters(),
     'open-create': () => openCreateModal({}),
     'pick-spot-on-map': () => pickSpotOnMap(),
     'gps-detect': () => detectCity(),
-    'pick-format': (node) => { state.filters.format = node.dataset.format; setActivePill(el('format-pills'), node); },
-    'pick-pace': (node) => { state.filters.pace = node.dataset.pace; setActivePill(el('pace-pills'), node); },
+    'pick-format': (node) => { state.filters.format = node.dataset.format; setActivePill(el('format-pills'), node); doSearch({ silent: true }); },
+    'pick-pace': (node) => { state.filters.pace = node.dataset.pace; setActivePill(el('pace-pills'), node); doSearch({ silent: true }); },
     'close-drawer': () => closeDrawer(),
     'start-party-with-friends': () => startPartyWithFriends(),
     'open-venue': (node) => openVenueDrawer(node.dataset.venueId),
@@ -2112,6 +2162,7 @@
   };
 
   const CHANGE_ACTIONS = {
+    'filter-change': () => doSearch({ silent: true }),
     'city-change': () => {
       readFilters();
       // Keep the Rated Venues tab on the same town: changing the global city moves its filter too.
@@ -2186,7 +2237,7 @@
     document.addEventListener('input', handleInput);
     document.addEventListener('submit', handleSubmit);
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') { closeAllModals(); closeDrawer(); }
+      if (event.key === 'Escape') { closeAllModals(); closeDrawer(); closeFilters(); }
     });
   };
 

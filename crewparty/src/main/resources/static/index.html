@@ -26,7 +26,6 @@
           <span class="identity-sub" id="identity-sub"></span>
         </span>
       </div>
-      <button class="btn btn-ghost btn-sm" data-action="open-second-tab" title="Open a second live user in a new tab">Open 2nd User Tab</button>
       <div class="notif-wrap">
         <button class="notif-bell" id="notif-bell" data-action="toggle-notif" aria-haspopup="true" aria-expanded="false" aria-label="Notifications">
           <span class="notif-glyph" aria-hidden="true">&#128276;</span>
@@ -40,7 +39,6 @@
     </div>
 
     <div class="header-actions">
-      <button class="btn btn-ghost" data-action="demo">1-Click Demo: 2 Buddies Seeking 2 Players</button>
       <button class="btn btn-primary" id="upgrade-btn" data-action="open-paywall">Upgrade ($9.99/mo)</button>
     </div>
   </div>
@@ -60,7 +58,11 @@
   <section class="view active" id="view-explore">
     <div class="explore-layout">
 
-      <aside class="filter-sidebar card" aria-label="Search filters">
+      <aside class="filter-sidebar card" id="filter-sidebar" aria-label="Search filters" aria-hidden="true">
+        <div class="filter-sidebar-head">
+          <h3>Filters</h3>
+          <button class="icon-btn" data-action="close-filters" aria-label="Close filters">&times;</button>
+        </div>
         <div class="filter-group">
           <div class="filter-group-title">Where</div>
           <div class="field">
@@ -78,7 +80,7 @@
           </div>
           <div class="field">
             <label class="field-label" for="filter-theme">Theme</label>
-            <select id="filter-theme" class="select">
+            <select id="filter-theme" class="select" data-action="filter-change">
               <option value="">All Themes</option>
               <option value="Board Games">Board Games</option>
               <option value="Co-op Video Games">Co-op Video Games</option>
@@ -89,7 +91,7 @@
           </div>
           <div class="field">
             <label class="field-label" for="filter-time">Time window</label>
-            <select id="filter-time" class="select">
+            <select id="filter-time" class="select" data-action="filter-change">
               <option value="">Any time</option>
               <option value="Tonight">Tonight</option>
               <option value="Tomorrow">Tomorrow</option>
@@ -103,8 +105,8 @@
           <div class="filter-group-title">Budget ($0 – $100)</div>
           <div class="range-dual">
             <div class="range-track"><div class="range-fill" id="budget-fill"></div></div>
-            <input type="range" id="budget-min" min="0" max="100" step="5" value="0" aria-label="Minimum budget" />
-            <input type="range" id="budget-max" min="0" max="100" step="5" value="100" aria-label="Maximum budget" />
+            <input type="range" data-action="filter-change" id="budget-min" min="0" max="100" step="5" value="0" aria-label="Minimum budget" />
+            <input type="range" data-action="filter-change" id="budget-max" min="0" max="100" step="5" value="100" aria-label="Maximum budget" />
           </div>
           <div class="range-readout"><span id="budget-readout">$0 – $100 per person</span></div>
         </div>
@@ -127,29 +129,29 @@
         <div class="filter-group">
           <div class="filter-group-title">Safety &amp; Trust</div>
           <label class="switch-row">
-            <input type="checkbox" id="friends-only" />
+            <input type="checkbox" id="friends-only" data-action="filter-change" />
             <span class="switch"></span>
             <span class="switch-text">Where My Friends Are</span>
           </label>
           <label class="switch-row">
-            <input type="checkbox" id="public-safe" />
+            <input type="checkbox" id="public-safe" data-action="filter-change" />
             <span class="switch"></span>
             <span class="switch-text">Public-Only Safe Spots</span>
           </label>
           <label class="switch-row">
-            <input type="checkbox" id="verified-only" />
+            <input type="checkbox" id="verified-only" data-action="filter-change" />
             <span class="switch"></span>
             <span class="switch-text">Verified Profiles Only</span>
           </label>
           <label class="switch-row">
-            <input type="checkbox" id="mini-group-only" />
+            <input type="checkbox" id="mini-group-only" data-action="filter-change" />
             <span class="switch"></span>
             <span class="switch-text">Mini-Groups Priority (3–4 People/Couples)</span>
           </label>
         </div>
 
         <div class="filter-actions-vertical">
-          <button class="btn btn-primary btn-block" data-action="search">Search</button>
+          <button class="btn btn-primary btn-block" data-action="search">Show results</button>
           <button class="btn btn-ghost btn-block" data-action="reset-filters">Reset filters</button>
           <button class="btn btn-accent btn-block" data-action="open-create">+ Create Party</button>
         </div>
@@ -178,7 +180,22 @@
           <div class="loading">Loading your slots…</div>
         </div>
 
+        <div class="explore-toolbar">
+          <button class="btn btn-ghost filters-btn" id="filters-toggle" data-action="toggle-filters" aria-expanded="false" aria-controls="filter-sidebar">
+            <span aria-hidden="true">&#9776;</span> Filters <span class="filters-count" id="filters-count" hidden>0</span>
+          </button>
+          <div class="quick-chips" id="quick-themes" role="group" aria-label="Quick theme filter">
+            <button class="qchip active" data-action="quick-theme" data-theme="">All</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Board Games">&#127922; Board Games</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Co-op Video Games">&#127918; Co-op Games</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Coworking &amp; Chill">&#9749; Coworking</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Trivia &amp; Social">&#127881; Trivia</button>
+            <button class="qchip" data-action="quick-theme" data-theme="Outdoor Casual">&#127795; Outdoor</button>
+          </div>
+          <button class="link-btn" id="filters-clear" data-action="reset-filters" hidden>Clear all</button>
+        </div>
         <h2 class="section-title">Open Parties</h2>
+        <p class="results-summary" id="results-summary" aria-live="polite"></p>
         <div id="party-list" class="card-list">
           <div class="loading">Loading open parties…</div>
         </div>
@@ -370,6 +387,7 @@
 </main>
 
 <!-- ============ DRAWER: VENUE SLOTS ============ -->
+<div class="filters-scrim" id="filters-scrim" data-action="close-filters" hidden></div>
 <div class="drawer-scrim" id="drawer-scrim" data-action="close-drawer" hidden></div>
 <aside class="drawer" id="venue-drawer" aria-hidden="true" aria-label="Venue slots">
   <header class="drawer-head">
